@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from leantrack._types import Detections, Frame
+from leantrack._types import Detections, Frame, Propagated
 from leantrack.pipeline import run
 from leantrack.propagate.flow import FlowPropagator
 from leantrack.schedule.policy import FixedInterval
@@ -29,8 +29,9 @@ def test_box_follows_a_known_image_shift() -> None:
     boxes = np.array([[100.0, 80.0, 160.0, 160.0], [200.0, 60.0, 240.0, 140.0]])
     moved = propagator.propagate(boxes)
     for box, new in zip(boxes, moved, strict=True):
-        assert new is not None
-        assert new == pytest.approx(box + np.array([4, -3, 4, -3]), abs=0.3)
+        assert new.box is not None
+        assert new.box == pytest.approx(box + np.array([4, -3, 4, -3]), abs=0.3)
+        assert new.reliability > 0.9
 
 
 def test_downscaled_flow_reports_full_resolution_pixels() -> None:
@@ -39,8 +40,8 @@ def test_downscaled_flow_reports_full_resolution_pixels() -> None:
     propagator.observe(image)
     propagator.observe(_shift(image, 8, 0))
     (moved,) = propagator.propagate(np.array([[400.0, 300.0, 600.0, 600.0]]))
-    assert moved is not None
-    assert moved == pytest.approx([408.0, 300.0, 608.0, 600.0], abs=1.0)
+    assert moved.box is not None
+    assert moved.box == pytest.approx([408.0, 300.0, 608.0, 600.0], abs=1.0)
 
 
 def test_box_without_texture_is_unreliable() -> None:
@@ -48,14 +49,17 @@ def test_box_without_texture_is_unreliable() -> None:
     propagator = FlowPropagator()
     propagator.observe(flat)
     propagator.observe(flat)
-    assert propagator.propagate(np.array([[100.0, 80.0, 160.0, 160.0]])) == [None]
+    (result,) = propagator.propagate(np.array([[100.0, 80.0, 160.0, 160.0]]))
+    assert result.box is None
+    assert result.reliability < 0.25
 
 
 def test_no_result_before_the_second_frame() -> None:
     propagator = FlowPropagator()
     assert propagator.propagate(np.empty((0, 4))) == []
     propagator.observe(_texture())
-    assert propagator.propagate(np.array([[100.0, 80.0, 160.0, 160.0]])) == [None]
+    (result,) = propagator.propagate(np.array([[100.0, 80.0, 160.0, 160.0]]))
+    assert result.box is None
 
 
 class _FirstFrameDetector:
@@ -101,5 +105,23 @@ def test_lost_track_ignores_a_propagated_box() -> None:
     tracker.update(Detections(box[None], np.array([0.9]), np.array([0])))
     tracker.update(Detections.empty())
     before = tracker.tracks[0].box.copy()
-    tracker.predict({1: box + 50.0})
+    tracker.predict({1: Propagated(box + 50.0, 1.0)})
     assert tracker.tracks[0].box == pytest.approx(before, abs=1e-6)
+
+
+def test_detection_replaces_the_propagated_box_on_a_detector_frame() -> None:
+    box = np.array([100.0, 80.0, 160.0, 160.0])
+    detection = Detections(box[None], np.array([0.9]), np.array([0]))
+    drifted = {1: Propagated(box + 30.0, 1.0)}
+
+    plain = Tracker()
+    with_flow = Tracker()
+    for tracker in (plain, with_flow):
+        tracker.update(detection)
+    plain.update(detection)
+    with_flow.update(detection, drifted)
+    assert with_flow.tracks[0].box == pytest.approx(plain.tracks[0].box)
+
+    # Without a detection in the frame, the filter uses the propagated box.
+    with_flow.predict(drifted)
+    assert with_flow.tracks[0].box[0] > 110.0

@@ -1,16 +1,61 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 
-from leantrack.io.mot import MotSequence
+from leantrack.detect.mot_file import MotFileDetector
+from leantrack.io.mot import MotSequence, MotWriter
+from leantrack.io.sources import image_dir_frames, index_frames
+from leantrack.pipeline import run
+from leantrack.propagate.flow import FlowPropagator
+from leantrack.schedule.policy import SchedulePolicy
+from leantrack.tracks.tracker import Tracker
 
 METRICS = ("HOTA", "AssA", "DetA", "MOTA", "IDF1", "IDSW")
 
 
 def mot17_sequences(data: Path, detector: str = "FRCNN") -> list[MotSequence]:
     return [MotSequence.load(root) for root in sorted(data.glob(f"MOT17-*-{detector}"))]
+
+
+def run_policy(
+    make_policy: Callable[[], SchedulePolicy],
+    sequences: list[MotSequence],
+    cache: Path,
+    out: Path,
+    flow: bool,
+) -> dict[str, float]:
+    """Track each sequence from stored detections and write `out/data/<sequence>.txt`.
+
+    Returns the detector use and the frame time. The replay of stored detections costs no
+    time, so the frame time uses the latency that the model had on that frame.
+    """
+    frame_ms: list[float] = []
+    detector_runs = 0
+    for sequence in sequences:
+        detector = MotFileDetector(cache / f"{sequence.name}.txt")
+        detect_ms = np.load(cache / f"{sequence.name}.latency.npy")
+        # The flow needs the pixels. The Kalman prediction does not, so it skips the decode.
+        frames = image_dir_frames(sequence.image_dir) if flow else index_frames(sequence.length)
+        propagator = FlowPropagator() if flow else None
+        results = run(frames, detector, Tracker(), make_policy(), propagator)
+        with MotWriter(out / "data" / f"{sequence.name}.txt") as writer:
+            for result in results:
+                writer.write(result.frame_index, result.objects)
+                cost = result.track_ms + result.propagate_ms
+                if result.detected:
+                    cost += float(detect_ms[result.frame_index - 1])
+                    detector_runs += 1
+                frame_ms.append(cost)
+    p50, p99 = np.percentile(frame_ms, [50, 99])
+    return {
+        "detector_runs_pct": 100 * detector_runs / len(frame_ms),
+        "mean_ms": float(np.mean(frame_ms)),
+        "p50_ms": float(p50),
+        "p99_ms": float(p99),
+    }
 
 
 def evaluate(

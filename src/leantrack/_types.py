@@ -57,3 +57,13 @@ class TrackedObject:
     box: tuple[float, float, float, float]
     score: float
     class_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class Propagated:
+    """The result of a propagator for one box in one frame."""
+
+    box: FloatArray | None
+    """The moved xyxy box, or None if the propagator has no reliable result."""
+    reliability: float
+    """Fraction of the sample points that passed the reliability check, in 0..1."""
