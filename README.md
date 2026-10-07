@@ -67,8 +67,6 @@ ONNX Runtime on the CPU of an Apple M3 Pro, one run.
 | 10 | 10.03 | 8.08 | 81.48 | 28.85 | 42.03 | 20.02 | 20.18 | 31.39 | 324 |
 | 20 | 5.04 | 4.10 | 79.49 | 22.24 | 37.13 | 13.57 | 10.62 | 22.22 | 234 |
 
-![HOTA against mean frame time](assets/interval_yolox_s.png)
-
 What the data shows:
 
 - At N = 3, the mean frame time decreases by 67% and HOTA decreases by 1.53 points.
@@ -80,6 +78,49 @@ What the data shows:
 
 The time is the stored detector latency plus the tracker time. It does not include the
 image decode.
+
+### Optical flow between detector runs
+
+Between detector runs, sparse Lucas-Kanade flow measures the motion of each box, and the
+Kalman filter uses that as a measurement. A forward-backward check rejects unreliable
+points. Same model and data as above.
+
+| N | Mean (ms/frame), Kalman | Mean (ms/frame), flow | HOTA, Kalman | HOTA, flow | IDSW, Kalman | IDSW, flow |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 39.97 | 41.21 | 36.64 | 37.22 | 301 | 206 |
+| 3 | 26.66 | 28.14 | 36.00 | 36.28 | 297 | 199 |
+| 5 | 16.06 | 17.74 | 32.98 | 34.13 | 326 | 189 |
+| 10 | 8.08 | 9.89 | 28.85 | 32.04 | 324 | 164 |
+| 20 | 4.10 | 5.98 | 22.24 | 28.98 | 234 | 119 |
+
+![HOTA against mean frame time, with and without optical flow](assets/interval_yolox_s.png)
+
+- The flow adds 1.2 to 1.9 ms to the mean frame time.
+- The gain increases with N: 0.28 HOTA at N = 3, 3.19 at N = 10, and 6.74 at N = 20.
+- The flow decreases the ID switches by 32% to 49%.
+- With the flow, N = 10 (9.89 ms, 32.04 HOTA) is near N = 5 without it (16.06 ms, 32.98 HOTA).
+- Known limit: when an object is mostly hidden, the points follow the object in front.
+
+### Model size against interval
+
+Kalman prediction only. Each row is one point near a frame time budget.
+
+| Configuration | Mean (ms/frame) | HOTA |
+|---|---:|---:|
+| YOLOX-s, N = 1 | 79.83 | 37.53 |
+| YOLOX-m, N = 3 | 65.69 | 37.99 |
+| YOLOX-s, N = 2 | 39.97 | 36.64 |
+| YOLOX-m, N = 5 | 39.48 | 35.58 |
+| YOLOX-tiny, N = 1 | 23.09 | 31.95 |
+| YOLOX-s, N = 5 | 16.06 | 32.98 |
+| YOLOX-nano, N = 1 | 8.42 | 28.47 |
+| YOLOX-s, N = 10 | 8.08 | 28.85 |
+
+![HOTA against mean frame time for four models](assets/interval_models.png)
+
+A larger model with a longer interval can be better than a smaller model on each frame.
+YOLOX-m at N = 3 is faster than YOLOX-s at N = 1 and has a higher score. Thus the model
+size and the interval must be selected together.
 
 ## Detector backends
 
@@ -125,6 +166,7 @@ Run the interval experiment (this needs `models/yolox_s.onnx`):
 ```sh
 .venv/bin/python bench/cache_detections.py models/yolox_s.onnx
 .venv/bin/python -m bench.interval yolox_s
+.venv/bin/python -m bench.interval yolox_s --flow
 ```
 
 ## Prior work
