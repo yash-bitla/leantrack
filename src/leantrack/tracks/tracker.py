@@ -66,8 +66,11 @@ class Tracker:
         """Move each track to the next frame. Follow it with `associate` or `coast`.
 
         `moved` maps a track id to the result of a propagator for this frame. The filter
-        uses the moved box as a measurement. A lost track ignores it, because the detector
-        did not see the object and the pixels in its box can be an occluder.
+        uses the moved box as a measurement only if the frame gets no detector run
+        (`coast`). A detection is a better measurement of the same frame. If the filter
+        used the two, the detection would correct only a part of the propagation drift.
+        A lost track ignores `moved`, because the detector did not see the object and
+        the pixels in its box can be an occluder.
         """
         self._frame += 1
         for track in self._tracks:
@@ -79,24 +82,32 @@ class Tracker:
             track.mean, track.covariance = self._kalman.predict(track.mean, track.covariance)
             track.frames_since_update += 1
 
+            track.pending = None
             result = moved.get(track.track_id) if moved else None
             if result is not None and track.state is not TrackState.LOST:
                 track.reliability = result.reliability
                 if result.box is not None:
-                    track.mean, track.covariance = self._kalman.update(
-                        track.mean, track.covariance, xyxy_to_cxcywh(result.box)
-                    )
+                    track.pending = xyxy_to_cxcywh(result.box)
+            target = track.mean[:2] if track.pending is None else track.pending[:2]
             size = float(np.sqrt(max(track.mean[2] * track.mean[3], 1.0)))
-            track.motion_since_update += float(np.linalg.norm(track.mean[:2] - center)) / size
+            track.motion_since_update += float(np.linalg.norm(target - center)) / size
 
     def coast(self) -> list[TrackedObject]:
         """Complete a frame without a detector run. Returns the predicted confirmed tracks."""
+        for track in self._tracks:
+            if track.pending is not None:
+                track.mean, track.covariance = self._kalman.update(
+                    track.mean, track.covariance, track.pending
+                )
+                track.pending = None
         self._remove_expired()
         return [t.as_output() for t in self._tracks if t.state is TrackState.CONFIRMED]
 
     def associate(self, detections: Detections) -> list[TrackedObject]:
         """Complete a frame with detections. Returns the confirmed tracks that got a match."""
         cfg = self.config
+        for track in self._tracks:
+            track.pending = None
 
         high = detections.select(detections.scores >= cfg.high_score)
         low = detections.select(

@@ -107,3 +107,21 @@ def test_lost_track_ignores_a_propagated_box() -> None:
     before = tracker.tracks[0].box.copy()
     tracker.predict({1: Propagated(box + 50.0, 1.0)})
     assert tracker.tracks[0].box == pytest.approx(before, abs=1e-6)
+
+
+def test_detection_replaces_the_propagated_box_on_a_detector_frame() -> None:
+    box = np.array([100.0, 80.0, 160.0, 160.0])
+    detection = Detections(box[None], np.array([0.9]), np.array([0]))
+    drifted = {1: Propagated(box + 30.0, 1.0)}
+
+    plain = Tracker()
+    with_flow = Tracker()
+    for tracker in (plain, with_flow):
+        tracker.update(detection)
+    plain.update(detection)
+    with_flow.update(detection, drifted)
+    assert with_flow.tracks[0].box == pytest.approx(plain.tracks[0].box)
+
+    # Without a detection in the frame, the filter uses the propagated box.
+    with_flow.predict(drifted)
+    assert with_flow.tracks[0].box[0] > 110.0
