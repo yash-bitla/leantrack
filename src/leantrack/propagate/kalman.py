@@ -55,3 +55,15 @@ class KalmanFilter:
         mean = mean + gain @ (measurement - projected_mean)
         covariance = covariance - gain @ projected_cov @ gain.T
         return mean, covariance
+
+    def gating_distance(
+        self, mean: FloatArray, covariance: FloatArray, centers: FloatArray
+    ) -> FloatArray:
+        """Squared Mahalanobis distance from the predicted center to each (cx, cy) in `centers`.
+
+        Only the position is used. The size of a box after an occlusion is not reliable.
+        """
+        difference = centers - mean[:2]
+        factor = scipy.linalg.cho_factor(covariance[:2, :2], lower=True, check_finite=False)
+        solved = scipy.linalg.cho_solve(factor, difference.T, check_finite=False)
+        return np.einsum("ij,ji->i", difference, solved)
