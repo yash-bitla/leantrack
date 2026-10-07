@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from leantrack._types import Detections, FloatArray, TrackedObject
+from leantrack._types import Detections, FloatArray, Propagated, TrackedObject
 from leantrack.associate.matching import assign
 from leantrack.boxes import iou_matrix, xyxy_to_cxcywh
 from leantrack.propagate.kalman import KalmanFilter
@@ -50,28 +50,53 @@ class Tracker:
     def tracks(self) -> list[Track]:
         return list(self._tracks)
 
-    def predict(self, moved: Mapping[int, FloatArray] | None = None) -> list[TrackedObject]:
-        """Advance one frame without a detector run. Returns the predicted confirmed tracks.
+    def predict(self, moved: Mapping[int, Propagated] | None = None) -> list[TrackedObject]:
+        """Advance one frame without a detector run. Returns the predicted confirmed tracks."""
+        self.advance(moved)
+        return self.coast()
 
-        `moved` maps a track id to the xyxy box that a propagator measured for this frame.
-        The filter uses it as a measurement. A lost track ignores it, because the detector
+    def update(
+        self, detections: Detections, moved: Mapping[int, Propagated] | None = None
+    ) -> list[TrackedObject]:
+        """Advance one frame. Returns the confirmed tracks that got a detection in this frame."""
+        self.advance(moved)
+        return self.associate(detections)
+
+    def advance(self, moved: Mapping[int, Propagated] | None = None) -> None:
+        """Move each track to the next frame. Follow it with `associate` or `coast`.
+
+        `moved` maps a track id to the result of a propagator for this frame. The filter
+        uses the moved box as a measurement. A lost track ignores it, because the detector
         did not see the object and the pixels in its box can be an occluder.
         """
-        self._advance()
-        if moved:
-            for track in self._tracks:
-                box = moved.get(track.track_id)
-                if box is not None and track.state is not TrackState.LOST:
+        self._frame += 1
+        for track in self._tracks:
+            if track.state is TrackState.LOST:
+                # A lost track keeps its position velocity but its size stays constant.
+                # An unobserved size velocity makes the box collapse or grow without limit.
+                track.mean[6:] = 0.0
+            center = track.mean[:2].copy()
+            track.mean, track.covariance = self._kalman.predict(track.mean, track.covariance)
+            track.frames_since_update += 1
+
+            result = moved.get(track.track_id) if moved else None
+            if result is not None and track.state is not TrackState.LOST:
+                track.reliability = result.reliability
+                if result.box is not None:
                     track.mean, track.covariance = self._kalman.update(
-                        track.mean, track.covariance, xyxy_to_cxcywh(box)
+                        track.mean, track.covariance, xyxy_to_cxcywh(result.box)
                     )
+            size = float(np.sqrt(max(track.mean[2] * track.mean[3], 1.0)))
+            track.motion_since_update += float(np.linalg.norm(track.mean[:2] - center)) / size
+
+    def coast(self) -> list[TrackedObject]:
+        """Complete a frame without a detector run. Returns the predicted confirmed tracks."""
         self._remove_expired()
         return [t.as_output() for t in self._tracks if t.state is TrackState.CONFIRMED]
 
-    def update(self, detections: Detections) -> list[TrackedObject]:
-        """Advance one frame. Returns the confirmed tracks that got a detection in this frame."""
+    def associate(self, detections: Detections) -> list[TrackedObject]:
+        """Complete a frame with detections. Returns the confirmed tracks that got a match."""
         cfg = self.config
-        self._advance()
 
         high = detections.select(detections.scores >= cfg.high_score)
         low = detections.select(
@@ -119,16 +144,6 @@ class Tracker:
             if t.state is TrackState.CONFIRMED and t.frames_since_update == 0
         ]
 
-    def _advance(self) -> None:
-        self._frame += 1
-        for track in self._tracks:
-            if track.state is TrackState.LOST:
-                # A lost track keeps its position velocity but its size stays constant.
-                # An unobserved size velocity makes the box collapse or grow without limit.
-                track.mean[6:] = 0.0
-            track.mean, track.covariance = self._kalman.predict(track.mean, track.covariance)
-            track.frames_since_update += 1
-
     def _remove_expired(self) -> None:
         for track in self._tracks:
             if (
@@ -147,6 +162,8 @@ class Tracker:
         track.class_id = int(detections.classes[index])
         track.hits += 1
         track.frames_since_update = 0
+        track.motion_since_update = 0.0
+        track.reliability = 1.0
         if track.state is not TrackState.CONFIRMED:
             track.transition(TrackState.CONFIRMED)
 

@@ -32,6 +32,11 @@ class Track:
     state: TrackState = TrackState.TENTATIVE
     hits: int = 1
     frames_since_update: int = 0
+    """Frames since the last detection match."""
+    motion_since_update: float = 0.0
+    """Path length of the box center since the last detection match, in box sizes."""
+    reliability: float = 1.0
+    """Reliability that the propagator reported in the last frame. 1.0 after a detection."""
 
     def transition(self, new_state: TrackState) -> None:
         if new_state not in _ALLOWED[self.state]:

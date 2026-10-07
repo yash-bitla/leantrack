@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from leantrack._types import FloatArray, Image
+from leantrack._types import FloatArray, Image, Propagated
 
 
 class FlowPropagator:
@@ -46,15 +46,15 @@ class FlowPropagator:
             gray = cv2.resize(gray, None, fx=self._scale, fy=self._scale)
         self._previous, self._current = self._current, gray
 
-    def propagate(self, boxes: FloatArray) -> list[FloatArray | None]:
+    def propagate(self, boxes: FloatArray) -> list[Propagated]:
         """Move xyxy boxes of the previous frame to the current frame.
 
-        An entry is None if the flow of that box is not reliable.
+        The box of an entry is None if the flow of that box is not reliable.
         """
         if len(boxes) == 0:
             return []
         if self._previous is None or self._current is None:
-            return [None] * len(boxes)
+            return [Propagated(None, 0.0)] * len(boxes)
 
         # Use the central 80% of each box. The border contains more background.
         fractions = np.linspace(0.1, 0.9, self._grid)
@@ -72,13 +72,14 @@ class FlowPropagator:
         )
         shift = ((forward - start).reshape(len(boxes), -1, 2) / self._scale).astype(np.float64)
 
-        moved: list[FloatArray | None] = []
+        moved: list[Propagated] = []
         for box, box_shift, box_reliable in zip(boxes, shift, reliable, strict=True):
+            reliability = float(box_reliable.mean())
             if box_reliable.sum() < self._min_points:
-                moved.append(None)
+                moved.append(Propagated(None, reliability))
                 continue
             dx, dy = np.median(box_shift[box_reliable], axis=0)
-            moved.append(box + np.array([dx, dy, dx, dy]))
+            moved.append(Propagated(box + np.array([dx, dy, dx, dy]), reliability))
         return moved
 
     def _track(
