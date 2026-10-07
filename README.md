@@ -8,9 +8,9 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phase 1 of 6 is complete, and Phase 2 is in progress. The fixed-interval scheduler and
-the detector backends exist. The interval experiment has no published results yet. The
-confidence monitor and the recovery logic do not exist yet.
+Phase 1 of 6 is complete, and Phase 2 is in progress. The fixed-interval scheduler, the
+detector backends, and the first interval experiment exist. The confidence monitor and
+the recovery logic do not exist yet.
 
 | Phase | Content | Status |
 |---|---|---|
@@ -51,6 +51,35 @@ parameters. No parameter was tuned on this data.
 The step time is the tracker update only, on an Apple M3 Pro, one run. It does not include
 detection. Do not compare these scores with published MOT17 scores, because published
 scores use the test set and stronger private detectors.
+
+## Detection interval experiment
+
+The detector runs on each N-th frame. On the other frames, the tracker reports its
+Kalman prediction. MOT17 train, 7 sequences, YOLOX-s (COCO weights, 640 x 640) through
+ONNX Runtime on the CPU of an Apple M3 Pro, one run.
+
+| N | Detector runs (%) | Mean (ms/frame) | p99 (ms/frame) | HOTA | AssA | DetA | MOTA | IDF1 | IDSW |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 100.00 | 79.83 | 109.43 | 37.53 | 48.14 | 29.41 | 33.12 | 44.22 | 245 |
+| 2 | 50.02 | 39.97 | 97.46 | 36.64 | 47.78 | 28.27 | 31.69 | 42.99 | 301 |
+| 3 | 33.33 | 26.66 | 92.16 | 36.00 | 48.14 | 27.09 | 30.05 | 41.90 | 297 |
+| 5 | 20.02 | 16.06 | 86.49 | 32.98 | 44.64 | 24.57 | 26.92 | 37.46 | 326 |
+| 10 | 10.03 | 8.08 | 81.48 | 28.85 | 42.03 | 20.02 | 20.18 | 31.39 | 324 |
+| 20 | 5.04 | 4.10 | 79.49 | 22.24 | 37.13 | 13.57 | 10.62 | 22.22 | 234 |
+
+![HOTA against mean frame time](assets/interval_yolox_s.png)
+
+What the data shows:
+
+- At N = 3, the mean frame time decreases by 67% and HOTA decreases by 1.53 points.
+- From N = 5, the loss increases quickly. Most of the loss is in DetA, the detection part.
+- The p99 time stays near 80 ms at each N. A frame with a detector run costs the same as
+  before, so a fixed interval improves the mean time and not the worst frame time.
+- The absolute scores are low. The model has COCO weights and no MOT17 training. The
+  public FRCNN detections give 47.11 HOTA with the same tracker.
+
+The time is the stored detector latency plus the tracker time. It does not include the
+image decode.
 
 ## Detector backends
 
