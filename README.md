@@ -8,14 +8,14 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phase 1 of 6 is complete, and Phase 2 is in progress. The fixed-interval scheduler, the
-detector backends, and the first interval experiment exist. The confidence monitor and
+Phases 1 and 2 of 6 are complete. The scheduler has a fixed-interval policy and a
+confidence trigger, with optical flow between detector runs. The failure predictor and
 the recovery logic do not exist yet.
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Tracker core, MOT input and output, evaluation, baseline | Complete |
-| 2 | Detection scheduler, track propagation between detections | In progress |
+| 2 | Detection scheduler, track propagation between detections | Complete |
 | 3 | Failure detection, recovery, re-identification | Not started |
 | 4 | Budget controller, ONNX detector, benchmark report | Not started |
 | 5 | Stream service, metrics endpoint, container | Not started |
@@ -101,6 +101,52 @@ points. Same model and data as above.
 - With the flow, N = 10 (9.89 ms, 32.04 HOTA) is near N = 5 without it (16.06 ms, 32.98 HOTA).
 - Known limit: when an object is mostly hidden, the points follow the object in front.
 
+### Fixed interval against confidence trigger
+
+The confidence trigger runs the detector when the tracks become uncertain. It has two
+signals for each track: the reliability of the optical flow, and the motion since the
+last detection in box sizes. It also has a maximum interval of 20 frames and a minimum
+interval of 2 frames.
+
+The two signals do predict a bad box. On four sequences at N = 10, a box with flow
+reliability below 0.25 had an IoU below 0.5 in 77.8% of cases, against 15.6% for
+reliability above 0.9. For motion above 0.8 box sizes the rate was 57.2%, against 12.4%
+for motion below 0.05.
+
+The comparison is HOTA at an equal share of frames with a detector run. The "fixed, same
+share" column is a linear interpolation between the two nearest fixed intervals.
+
+| Trigger | Threshold | Detector runs (%) | HOTA | HOTA of fixed, same share | Difference |
+|---|---:|---:|---:|---:|---:|
+| Motion | 0.10 | 34.24 | 36.77 | 36.33 | +0.44 |
+| Motion | 0.20 | 22.03 | 34.84 | 34.45 | +0.39 |
+| Motion | 0.40 | 12.77 | 32.22 | 32.61 | -0.39 |
+| Motion | 0.80 | 7.43 | 30.21 | 30.45 | -0.24 |
+| Reliability | 0.05 | 15.20 | 32.18 | 33.12 | -0.94 |
+| Reliability | 0.10 | 14.65 | 31.39 | 33.01 | -1.62 |
+| Reliability | 0.20 | 9.69 | 30.51 | 31.83 | -1.32 |
+| Reliability | 0.40 | 7.30 | 29.64 | 30.37 | -0.73 |
+
+![HOTA against the share of frames with a detector run](assets/trigger_yolox_s.png)
+
+**Result: the trigger is not better than a fixed interval on this data.** The motion
+trigger is within 0.5 HOTA of the fixed interval in the two directions. The reliability
+trigger is 0.7 to 1.6 points lower. A fixed interval is thus the correct default here.
+
+Possible causes, not tested:
+
+- Most of the loss at long intervals is in DetA. Objects that the tracker does not know
+  cause a part of that loss, and no track signal can show a new object.
+- Low flow reliability frequently means occlusion. The detector cannot see a hidden
+  object, so a detector run at that time does not help.
+- The MOT17 scenes are crowded. With 20 or more tracks, some track is almost always above
+  a threshold, so the trigger behaves like an irregular fixed interval.
+
+The fixed interval points of this experiment are identical to the table above, which is
+a check of the pipeline. One design point came from this experiment: on a frame with a
+detector run, the detection must replace the flow measurement. When the filter used the
+two, HOTA was 1.00 lower at N = 10 and 1.70 lower at N = 20.
+
 ### Model size against interval
 
 Kalman prediction only. Each row is one point near a frame time budget.
@@ -167,6 +213,7 @@ Run the interval experiment (this needs `models/yolox_s.onnx`):
 .venv/bin/python bench/cache_detections.py models/yolox_s.onnx
 .venv/bin/python -m bench.interval yolox_s
 .venv/bin/python -m bench.interval yolox_s --flow
+.venv/bin/python -m bench.trigger yolox_s --jobs 4
 ```
 
 ## Prior work
