@@ -11,20 +11,39 @@ import argparse
 import json
 import time
 from collections.abc import Callable
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 
-from bench._eval import METRICS, evaluate, markdown_table, mot17_sequences
+from bench._eval import METRICS, evaluate, load_embeddings, markdown_table, mot17_sequences
 from leantrack._types import Detections, TrackedObject
 from leantrack.io.mot import MotSequence, MotWriter, read_detections
-from leantrack.tracks.tracker import Tracker
+from leantrack.tracks.tracker import Tracker, TrackerConfig
 
-Step = Callable[[Detections], list[TrackedObject]]
+Step = Callable[[int, Detections], list[TrackedObject]]
+"""Takes the 1-based frame index and the detections of that frame."""
+
+EMBEDDINGS = Path("runs/embeddings")
+_LONG = TrackerConfig(max_lost_frames=90)
+_HISTOGRAM = replace(_LONG, max_appearance_distance=0.2, max_lost_match_distance=0.3)
 
 
-def _leantrack(sequence: MotSequence) -> Step:
-    return Tracker().update
+def _leantrack(config: TrackerConfig, embedder: str | None, sequence: MotSequence) -> Step:
+    tracker = Tracker(config)
+    if embedder is None:
+        return lambda frame, detections: tracker.update(detections)
+    # Stored vectors, see `cache_embeddings.py`. They exist for the SDP detections only.
+    vectors = load_embeddings(
+        EMBEDDINGS / embedder / f"{sequence.name}.npy", sequence.detections_path
+    )
+
+    def step(frame: int, detections: Detections) -> list[TrackedObject]:
+        stored = vectors.get(frame)
+        return tracker.update(detections, embed=None if stored is None else stored.__getitem__)
+
+    return step
 
 
 def _boxmot_bytetrack(sequence: MotSequence) -> Step:
@@ -32,7 +51,7 @@ def _boxmot_bytetrack(sequence: MotSequence) -> Step:
 
     tracker = ByteTrack(frame_rate=round(sequence.frame_rate))
 
-    def step(detections: Detections) -> list[TrackedObject]:
+    def step(frame: int, detections: Detections) -> list[TrackedObject]:
         rows = np.column_stack([detections.boxes, detections.scores, detections.classes])
         out = np.asarray(tracker.update(rows.reshape(-1, 6)))
         # Output columns: x1, y1, x2, y2, id, score, class, detection index.
@@ -45,9 +64,15 @@ def _boxmot_bytetrack(sequence: MotSequence) -> Step:
 
 
 TRACKERS: dict[str, Callable[[MotSequence], Step]] = {
-    "leantrack": _leantrack,
+    "leantrack": partial(_leantrack, TrackerConfig(), None),
+    "leantrack-lost-90": partial(_leantrack, _LONG, None),
+    "leantrack-histogram": partial(_leantrack, _HISTOGRAM, "histogram"),
+    "leantrack-osnet": partial(_leantrack, _LONG, "osnet"),
+    "leantrack-osnet-lost-30": partial(_leantrack, TrackerConfig(), "osnet"),
+    "leantrack-osnet-lost-60": partial(_leantrack, TrackerConfig(max_lost_frames=60), "osnet"),
     "boxmot-bytetrack": _boxmot_bytetrack,
 }
+DEFAULT_TRACKERS = ["boxmot-bytetrack", "leantrack"]
 
 
 def _run(name: str, sequences: list[MotSequence], out: Path) -> dict[str, float]:
@@ -59,7 +84,7 @@ def _run(name: str, sequences: list[MotSequence], out: Path) -> dict[str, float]
             for frame in range(1, sequence.length + 1):
                 detections = by_frame.get(frame, Detections.empty())
                 start = time.perf_counter()
-                objects = step(detections)
+                objects = step(frame, detections)
                 step_ms.append((time.perf_counter() - start) * 1000.0)
                 writer.write(frame, objects)
     p50, p99 = np.percentile(step_ms, [50, 99])
@@ -71,7 +96,7 @@ def main() -> int:
     p.add_argument("--data", type=Path, default=Path("data/MOT17/train"))
     p.add_argument("--detector", choices=["DPM", "FRCNN", "SDP"], default="FRCNN")
     p.add_argument("--out", type=Path, default=Path("runs/mot17"))
-    p.add_argument("--trackers", nargs="+", choices=sorted(TRACKERS), default=sorted(TRACKERS))
+    p.add_argument("--trackers", nargs="+", choices=sorted(TRACKERS), default=DEFAULT_TRACKERS)
     args = p.parse_args()
 
     sequences = mot17_sequences(args.data, args.detector)
