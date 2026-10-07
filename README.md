@@ -8,15 +8,16 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phases 1 and 2 of 6 are complete. The scheduler has a fixed-interval policy and a
-confidence trigger, with optical flow between detector runs. The failure predictor and
-the recovery logic do not exist yet.
+Phases 1 and 2 of 6 are complete, and Phase 3 is in progress. The scheduler has a
+fixed-interval policy and a confidence trigger, with optical flow between detector runs.
+Lost tracks can recover by appearance. The learned failure predictor does not exist yet,
+and the pipeline does not use an embedder yet: only the tracker and the experiments do.
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Tracker core, MOT input and output, evaluation, baseline | Complete |
 | 2 | Detection scheduler, track propagation between detections | Complete |
-| 3 | Failure detection, recovery, re-identification | Not started |
+| 3 | Failure detection, recovery, re-identification | In progress |
 | 4 | Budget controller, ONNX detector, benchmark report | Not started |
 | 5 | Stream service, metrics endpoint, container | Not started |
 | 6 | Demo assets, decision records | Not started |
@@ -168,6 +169,67 @@ A larger model with a longer interval can be better than a smaller model on each
 YOLOX-m at N = 3 is faster than YOLOX-s at N = 1 and has a higher score. Thus the model
 size and the interval must be selected together.
 
+## Recovery after occlusion
+
+The experiment removes the detections of one ground-truth object for D frames. A track
+"recovers" if the track that followed the object before the gap follows it again in the
+30 frames after the gap. The detector runs on each frame, and each event has its own
+tracker run. The detections are the public SDP detections of MOT17.
+
+A lost track can recover in two ways. The IoU match works while the predicted box
+overlaps the object. The appearance match compares a stored vector of the track with the
+vector of an unmatched detection. A position gate from the Kalman covariance limits the
+candidates. The appearance also blocks the IoU match of a lost track with a detection
+that looks different.
+
+The thresholds were selected on three sequences (02, 04, 09). The table shows the four
+other sequences (05, 10, 11, 13), which have moving cameras.
+
+| Gap D (frames) | Events | Default | Lost lifetime 90 | Histogram | OSNet x0.25 |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 112 | 99.11 | 100.00 | 100.00 | 99.10 |
+| 5 | 99 | 88.89 | 87.76 | 92.93 | 90.82 |
+| 15 | 102 | 43.14 | 44.12 | 66.67 | 63.37 |
+| 30 | 96 | 15.62 | 16.67 | 56.25 | 57.14 |
+| 60 | 82 | 1.22 | 8.54 | 26.83 | 39.02 |
+
+The values are the percentage of tracks that recover. The event count changes by 1 to 3
+between variants, because an event counts only if the object had a track before the gap.
+
+![Recovery rate against the gap length](assets/occlusion_recovery.png)
+
+- Appearance increases the recovery at D = 30 from 15.62% to about 57%.
+- A longer lifetime without appearance gives almost no gain. The predicted box drifts
+  away, so the IoU match fails.
+- The histogram is equal to OSNet up to D = 30. It costs 0.07 ms for each box, against
+  about 1.6 ms for OSNet on this CPU. OSNet is better only at D = 60.
+- The rate at which the stored vector updates had a large effect. On the tune split at
+  D = 60, a momentum of 0.9 gave 57.53% and a momentum of 0.5 gave 68.49%.
+
+**The MOT17 scores do not improve.** On the full MOT17 train set with SDP detections,
+recovery by appearance changes HOTA by less than 0.1:
+
+| Tracker | HOTA | IDF1 | IDSW |
+|---|---:|---:|---:|
+| leantrack, default | 53.94 | 64.28 | 846 |
+| leantrack, lost lifetime 90 | 53.30 | 63.11 | 938 |
+| leantrack, OSNet, lost lifetime 30 | 53.88 | 63.71 | 791 |
+| leantrack, OSNet, lost lifetime 60 | 53.99 | 63.97 | 846 |
+| leantrack, OSNet, lost lifetime 90 | 53.88 | 63.63 | 876 |
+
+A longer lifetime without appearance makes the scores worse. Appearance removes that
+loss but adds no gain. Thus the synthetic test shows a capability that this benchmark
+does not reward. The cause is not tested.
+
+Limits of this experiment:
+
+- The gap removes detections only. The pixels do not change, so the object looks the
+  same after the gap as before it.
+- The appearance vectors come from stored files, so the step times above do not include
+  the embedder.
+- The tune split has 73 to 89 events and the test split has 82 to 112. One event is about
+  1 percentage point.
+
 ## Detector backends
 
 | Backend | Install | License of the backend |
@@ -214,6 +276,14 @@ Run the interval experiment (this needs `models/yolox_s.onnx`):
 .venv/bin/python -m bench.interval yolox_s
 .venv/bin/python -m bench.interval yolox_s --flow
 .venv/bin/python -m bench.trigger yolox_s --jobs 4
+```
+
+Run the occlusion experiment (the OSNet variant needs an ONNX export of OSNet x0.25):
+
+```sh
+.venv/bin/python -m bench.cache_embeddings histogram
+.venv/bin/python -m bench.cache_embeddings osnet --model models/osnet_x0_25_msmt17.onnx
+.venv/bin/python -m bench.occlusion --split test --jobs 6
 ```
 
 ## Prior work
