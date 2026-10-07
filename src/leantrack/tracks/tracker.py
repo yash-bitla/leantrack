@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -49,9 +50,21 @@ class Tracker:
     def tracks(self) -> list[Track]:
         return list(self._tracks)
 
-    def predict(self) -> list[TrackedObject]:
-        """Advance one frame without a detector run. Returns the predicted confirmed tracks."""
+    def predict(self, moved: Mapping[int, FloatArray] | None = None) -> list[TrackedObject]:
+        """Advance one frame without a detector run. Returns the predicted confirmed tracks.
+
+        `moved` maps a track id to the xyxy box that a propagator measured for this frame.
+        The filter uses it as a measurement. A lost track ignores it, because the detector
+        did not see the object and the pixels in its box can be an occluder.
+        """
         self._advance()
+        if moved:
+            for track in self._tracks:
+                box = moved.get(track.track_id)
+                if box is not None and track.state is not TrackState.LOST:
+                    track.mean, track.covariance = self._kalman.update(
+                        track.mean, track.covariance, xyxy_to_cxcywh(box)
+                    )
         self._remove_expired()
         return [t.as_output() for t in self._tracks if t.state is TrackState.CONFIRMED]
 
