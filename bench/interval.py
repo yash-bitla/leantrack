@@ -17,24 +17,30 @@ import numpy as np
 from bench._eval import METRICS, evaluate, markdown_table, mot17_sequences
 from leantrack.detect.mot_file import MotFileDetector
 from leantrack.io.mot import MotSequence, MotWriter
-from leantrack.io.sources import index_frames
+from leantrack.io.sources import image_dir_frames, index_frames
 from leantrack.pipeline import run
+from leantrack.propagate.flow import FlowPropagator
 from leantrack.schedule.policy import FixedInterval
 from leantrack.tracks.tracker import Tracker
 
 
-def _run(interval: int, sequences: list[MotSequence], cache: Path, out: Path) -> dict[str, float]:
+def _run(
+    interval: int, sequences: list[MotSequence], cache: Path, out: Path, flow: bool
+) -> dict[str, float]:
     frame_ms: list[float] = []
     detector_runs = 0
     for sequence in sequences:
         detector = MotFileDetector(cache / f"{sequence.name}.txt")
         detect_ms = np.load(cache / f"{sequence.name}.latency.npy")
-        results = run(index_frames(sequence.length), detector, Tracker(), FixedInterval(interval))
+        # The flow needs the pixels. The Kalman prediction does not, so it skips the decode.
+        frames = image_dir_frames(sequence.image_dir) if flow else index_frames(sequence.length)
+        propagator = FlowPropagator() if flow else None
+        results = run(frames, detector, Tracker(), FixedInterval(interval), propagator)
         with MotWriter(out / "data" / f"{sequence.name}.txt") as writer:
             for result in results:
                 writer.write(result.frame_index, result.objects)
                 # The replay costs no time, so use the latency that the model had on this frame.
-                cost = result.track_ms
+                cost = result.track_ms + result.propagate_ms
                 if result.detected:
                     cost += float(detect_ms[result.frame_index - 1])
                     detector_runs += 1
@@ -49,31 +55,6 @@ def _run(interval: int, sequences: list[MotSequence], cache: Path, out: Path) ->
     }
 
 
-def _plot(summary: dict[str, dict[str, float]], model: str, path: Path) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    rows = list(summary.values())
-    fig, ax = plt.subplots(figsize=(6.4, 4.2))
-    ax.plot([r["mean_ms"] for r in rows], [r["HOTA"] for r in rows], marker="o")
-    for r in rows:
-        ax.annotate(
-            f"N={r['interval']:.0f}",
-            (r["mean_ms"], r["HOTA"]),
-            textcoords="offset points",
-            xytext=(6, -12),
-        )
-    ax.set_xlabel("Mean time for each frame (ms)")
-    ax.set_ylabel("HOTA")
-    ax.set_title(f"Detection interval N, {model}, MOT17 train")
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
-
-
 def main() -> int:
     p = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     p.add_argument("model", help="model name, a folder in the detection cache")
@@ -81,25 +62,24 @@ def main() -> int:
     p.add_argument("--cache", type=Path, default=Path("runs/detections"))
     p.add_argument("--out", type=Path, default=Path("runs/interval"))
     p.add_argument("--intervals", type=int, nargs="+", default=[1, 2, 3, 5, 10, 20])
-    p.add_argument("--plot", type=Path, help="write a chart to this file")
+    p.add_argument("--flow", action="store_true", help="correct predictions with optical flow")
     args = p.parse_args()
 
     sequences = mot17_sequences(args.data)
-    out = args.out / args.model
+    out = args.out / (f"{args.model}-flow" if args.flow else args.model)
     names = [f"n{n:02d}" for n in args.intervals]
     costs = {
-        name: _run(n, sequences, args.cache / args.model, out / name)
+        name: _run(n, sequences, args.cache / args.model, out / name, args.flow)
         for name, n in zip(names, args.intervals, strict=True)
     }
     scores = evaluate(names, sequences, args.data, out)
     summary = {name: {**costs[name], **scores[name]} for name in names}
 
-    print(f"MOT17 train, {args.model}, {len(sequences)} sequences")
+    mode = "Kalman + optical flow" if args.flow else "Kalman"
+    print(f"MOT17 train, {args.model}, {mode}, {len(sequences)} sequences")
     columns = ["detector_runs_pct", "mean_ms", "p99_ms", *METRICS]
     print(markdown_table(summary, columns, "interval"))
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    if args.plot:
-        _plot(summary, args.model, args.plot)
     return 0
 
 
