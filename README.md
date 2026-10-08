@@ -10,8 +10,8 @@ latency budget, and it will report the accuracy cost of each decision.
 
 Phases 1 and 2 of 6 are complete, and Phase 3 is in progress. The scheduler has a
 fixed-interval policy and a confidence trigger, with optical flow between detector runs.
-Lost tracks can recover by appearance. The learned failure predictor does not exist yet,
-and the pipeline does not use an embedder yet: only the tracker and the experiments do.
+Lost tracks can recover by appearance, also in the live pipeline. The learned failure
+predictor does not exist yet.
 
 | Phase | Content | Status |
 |---|---|---|
@@ -221,12 +221,36 @@ A longer lifetime without appearance makes the scores worse. Appearance removes 
 loss but adds no gain. Thus the synthetic test shows a capability that this benchmark
 does not reward. The cause is not tested.
 
+### Recovery in the live pipeline
+
+Here the embedder runs on the real pixels in the pipeline, and its time is in the frame
+time. MOT17 train, 7 sequences, YOLOX-s detections, optical flow between detector runs,
+default lost lifetime of 30 frames.
+
+| N | Appearance | Embedder time for each detector run (ms) | Mean (ms/frame) | HOTA | IDF1 | IDSW |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | None | 0.00 | 81.98 | 37.53 | 44.22 | 245 |
+| 1 | Histogram | 0.11 | 82.27 | 38.37 | 45.19 | 230 |
+| 1 | OSNet x0.25 | 4.45 | 87.28 | 38.52 | 45.58 | 219 |
+| 5 | None | 0.00 | 18.12 | 34.13 | 39.01 | 189 |
+| 5 | Histogram | 0.13 | 18.45 | 34.36 | 39.79 | 195 |
+| 5 | OSNet x0.25 | 3.32 | 19.15 | 34.62 | 40.27 | 186 |
+
+- With the YOLOX-s detections, appearance does improve the scores: +0.84 HOTA for the
+  histogram and +0.99 for OSNet at N = 1. With the stronger SDP detections above, it did
+  not. A possible cause, not tested: a weaker detector misses objects more frequently,
+  so more tracks become lost and can recover.
+- The histogram gives most of the gain of OSNet for about 3% of its time.
+- OSNet adds 5.30 ms to the mean frame at N = 1, which is 6.5%.
+- The tracker requests few vectors. OSNet takes about 1.6 ms for each box, so 4.45 ms is
+  about 3 boxes for each detector run.
+
 Limits of this experiment:
 
 - The gap removes detections only. The pixels do not change, so the object looks the
   same after the gap as before it.
-- The appearance vectors come from stored files, so the step times above do not include
-  the embedder.
+- In the occlusion experiment and in the SDP table, the appearance vectors come from
+  stored files, so those step times do not include the embedder.
 - The tune split has 73 to 89 events and the test split has 82 to 112. One event is about
   1 percentage point.
 
@@ -255,7 +279,20 @@ python3.12 -m venv .venv
 
 ## Use
 
-Track one MOTChallenge sequence from its detection file:
+Track a video file or an image directory with a YOLOX model:
+
+```sh
+.venv/bin/leantrack track video.mp4 --out tracks.txt --model models/yolox_s.onnx \
+    --interval 3 --flow --reid histogram
+```
+
+- `--interval N` runs the detector on each N-th frame.
+- `--flow` corrects the tracks with optical flow between detector runs.
+- `--reid` is `none`, `histogram`, or the path of a ReID model in ONNX format.
+
+The output has the MOTChallenge format: `frame, id, left, top, width, height, score`.
+
+Track one MOTChallenge sequence from its detection file, without a model:
 
 ```sh
 .venv/bin/leantrack track data/MOT17/train/MOT17-02-FRCNN --out runs/MOT17-02.txt
