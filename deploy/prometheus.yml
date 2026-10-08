@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 2s
+
+scrape_configs:
+  - job_name: leantrack
+    static_configs:
+      - targets: ["leantrack:8000"]
