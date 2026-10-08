@@ -8,18 +8,18 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phases 1, 2 and 3 of 6 are complete, and Phase 4 is in progress. The scheduler has a
-fixed-interval policy and a confidence trigger, with optical flow between detector runs.
-Lost tracks can recover by appearance. A learned failure predictor exists, but its
-measured value is small. The detector can run in a background thread for a live stream.
-A frame time budget and a quantized model do not exist yet.
+Phases 1 to 4 of 6 are complete. The scheduler has a fixed-interval policy and a
+confidence trigger, with optical flow between detector runs. Lost tracks can recover by
+appearance. A learned failure predictor exists, but its measured value is small. For a
+live stream, the detector can run in a background thread with a frame time budget, and
+a script makes an INT8 model. A stream service does not exist yet.
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Tracker core, MOT input and output, evaluation, baseline | Complete |
 | 2 | Detection scheduler, track propagation between detections | Complete |
 | 3 | Failure detection, recovery, re-identification | Complete |
-| 4 | Background detector, budget controller, quantized model | In progress |
+| 4 | Background detector, frame time budget, quantized model | Complete |
 | 5 | Stream service, metrics endpoint, container | Not started |
 | 6 | Demo assets, decision records | Not started |
 
@@ -225,6 +225,70 @@ worker processes. The detector latency is the stored value. The `ThreadedExecuto
 the same logic with a real thread. Its tests use a slow test detector, and no experiment
 measured it on a live camera.
 
+### Frame time budget
+
+The background loop above does not wait for the detector. That is wrong for a fast
+detector, as the YOLOX-tiny rows show. With a frame time budget, the loop waits for the
+detector only if it expects the result inside the budget. The estimate is a moving
+average of the durations of the earlier detector runs.
+
+| Model | Budget (ms) | Age of the result (frames) | Output latency, mean (ms) | Output latency, p99 (ms) | HOTA |
+|---|---:|---:|---:|---:|---:|
+| YOLOX-tiny | 0 | 1.01 | 4.42 | 10.70 | 31.34 |
+| YOLOX-tiny | 10 | 1.00 | 4.52 | 12.22 | 31.29 |
+| YOLOX-tiny | 20 | 1.00 | 4.50 | 16.67 | 31.29 |
+| YOLOX-tiny | 33 | 0.03 | 24.66 | 31.44 | 31.86 |
+| YOLOX-s | 0 | 2.68 | 5.53 | 22.14 | 34.49 |
+| YOLOX-s | 10 | 2.66 | 5.62 | 20.91 | 33.80 |
+| YOLOX-s | 20 | 2.33 | 6.13 | 21.85 | 34.13 |
+| YOLOX-s | 33 | 1.82 | 8.71 | 33.53 | 34.80 |
+| YOLOX-m | 0 | 5.24 | 5.29 | 29.61 | 32.97 |
+| YOLOX-m | 10 | 5.23 | 5.25 | 29.60 | 32.90 |
+| YOLOX-m | 20 | 5.21 | 5.70 | 31.33 | 33.09 |
+| YOLOX-m | 33 | 5.19 | 6.44 | 37.88 | 33.17 |
+
+- For the fast detector, the budget works as designed. At 33 ms, YOLOX-tiny gets a new
+  result on almost each frame, and HOTA goes from 31.34 to 31.86. The blocking loop gave
+  31.94.
+- For the slow detectors, the effect is small and not consistent. YOLOX-s is best at
+  33 ms but is worse at 10 ms than at 0 ms.
+- A change of the budget changes which frames the detector sees. That alone moves HOTA
+  by about 0.7 for YOLOX-s. Thus a difference below that size between two live
+  configurations is not reliable.
+
+### Quantized model
+
+`bench/quantize.py` makes an INT8 version of a YOLOX model with static quantization.
+The 122 calibration images are frames of the sequences 02, 04 and 09.
+
+| Model | File size (MB) | Detector time, mean (ms) | HOTA, offline | MOTA, offline |
+|---|---:|---:|---:|---:|
+| YOLOX-s, float | 35.9 | 79.83 | 37.53 | 33.12 |
+| YOLOX-s, INT8 | 9.3 | 28.47 | 36.53 | 31.99 |
+
+The INT8 model is 2.8 times faster and loses 1.00 HOTA offline. On the live stream, that
+exchange is a large gain, because the detector now fits in one frame period:
+
+| Model | Mode | Output latency, mean (ms) | Output latency, p99 (ms) | Frames over the period (%) | HOTA |
+|---|---|---:|---:|---:|---:|
+| YOLOX-s, float | Blocking | 101.44 | 147.27 | 100.00 | 32.90 |
+| YOLOX-s, float | Background | 5.12 | 18.02 | 0.00 | 34.49 |
+| YOLOX-s, INT8 | Blocking | 28.57 | 56.53 | 5.59 | 36.44 |
+| YOLOX-s, INT8 | Background | 4.31 | 9.64 | 0.00 | 35.70 |
+| YOLOX-s, INT8 | Background, budget 33 ms | 18.66 | 31.78 | 0.13 | 36.37 |
+
+- The INT8 model in a blocking loop (36.44) is 1.95 HOTA better than the float model in
+  the background (34.49). A faster model helped more than a better schedule.
+- The blocking loop is late on 5.59% of the frames. The background loop with a budget of
+  33 ms has almost the same HOTA (36.37) and is late on 0.13% of the frames.
+- These times are from an Apple M3 Pro CPU. The gain from INT8 depends on the processor.
+
+Limits of the live stream experiments:
+
+- The clock is simulated, as described above.
+- No experiment used a GPU, a CPU with a thread limit, or a small device.
+- No experiment measured memory or CPU use.
+
 ## Recovery after occlusion
 
 The experiment removes the detections of one ground-truth object for D frames. A track
@@ -425,6 +489,16 @@ Run the live stream experiment:
 
 ```sh
 .venv/bin/python -m bench.realtime yolox_s --jobs 4
+.venv/bin/python -m bench.realtime yolox_s --jobs 4 --budgets 0 10 20 33
+```
+
+Make and measure the INT8 model (this needs the `onnx` package):
+
+```sh
+.venv/bin/python -m bench.quantize models/yolox_s.onnx models/yolox_s_int8.onnx
+.venv/bin/python bench/cache_detections.py models/yolox_s_int8.onnx
+.venv/bin/python -m bench.interval yolox_s_int8 --intervals 1
+.venv/bin/python -m bench.realtime yolox_s_int8 --jobs 4
 ```
 
 Run the occlusion experiment (the OSNet variant needs an ONNX export of OSNet x0.25):
