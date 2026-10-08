@@ -57,6 +57,8 @@ class TrackedObject:
     box: tuple[float, float, float, float]
     score: float
     class_id: int
+    failure_probability: float | None = None
+    """Probability that the box is wrong. None if the pipeline has no failure predictor."""
 
 
 @dataclass(frozen=True, slots=True)

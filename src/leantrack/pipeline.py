@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from leantrack._types import FloatArray, Frame, Image, IntArray, TrackedObject
+from leantrack.confidence.features import track_features
+from leantrack.confidence.predictor import FailurePredictor
 from leantrack.detect.base import Detector
 from leantrack.propagate.flow import FlowPropagator
 from leantrack.reid.base import Embedder
@@ -40,6 +42,7 @@ def run(
     policy: SchedulePolicy | None = None,
     propagator: FlowPropagator | None = None,
     embedder: Embedder | None = None,
+    predictor: FailurePredictor | None = None,
 ) -> Iterator[FrameResult]:
     """Track a frame sequence.
 
@@ -50,6 +53,9 @@ def run(
     With an embedder, a lost track can recover by appearance. The embedder runs only on
     frames with a detector run, and only for the detections that the tracker requests.
     The propagator and the embedder need the pixels.
+
+    With a failure predictor, each reported object has the probability that its box is
+    wrong. The pipeline does not remove objects. The caller selects a limit.
     """
     policy = policy or FixedInterval(1)
     since_detection: int | None = None
@@ -87,6 +93,18 @@ def run(
             since_detection = 0
         else:
             objects = tracker.coast()
+        if predictor is not None and objects:
+            tracks = tracker.tracks
+            probability = dict(
+                zip(
+                    (t.track_id for t in tracks),
+                    predictor.probability(track_features(tracks)),
+                    strict=True,
+                )
+            )
+            objects = [
+                replace(o, failure_probability=float(probability[o.track_id])) for o in objects
+            ]
         end = time.perf_counter()
         yield FrameResult(
             frame.index,
