@@ -8,16 +8,15 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phases 1 and 2 of 6 are complete, and Phase 3 is in progress. The scheduler has a
-fixed-interval policy and a confidence trigger, with optical flow between detector runs.
-Lost tracks can recover by appearance. The learned failure predictor does not exist yet,
-and the pipeline does not use an embedder yet: only the tracker and the experiments do.
+Phases 1, 2 and 3 of 6 are complete. The scheduler has a fixed-interval policy and a
+confidence trigger, with optical flow between detector runs. Lost tracks can recover by
+appearance. A learned failure predictor exists, but its measured value is small.
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Tracker core, MOT input and output, evaluation, baseline | Complete |
 | 2 | Detection scheduler, track propagation between detections | Complete |
-| 3 | Failure detection, recovery, re-identification | In progress |
+| 3 | Failure detection, recovery, re-identification | Complete |
 | 4 | Budget controller, ONNX detector, benchmark report | Not started |
 | 5 | Stream service, metrics endpoint, container | Not started |
 | 6 | Demo assets, decision records | Not started |
@@ -221,14 +220,86 @@ A longer lifetime without appearance makes the scores worse. Appearance removes 
 loss but adds no gain. Thus the synthetic test shows a capability that this benchmark
 does not reward. The cause is not tested.
 
+### Recovery in the live pipeline
+
+Here the embedder runs on the real pixels in the pipeline, and its time is in the frame
+time. MOT17 train, 7 sequences, YOLOX-s detections, optical flow between detector runs,
+default lost lifetime of 30 frames.
+
+| N | Appearance | Embedder time for each detector run (ms) | Mean (ms/frame) | HOTA | IDF1 | IDSW |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | None | 0.00 | 81.98 | 37.53 | 44.22 | 245 |
+| 1 | Histogram | 0.11 | 82.27 | 38.37 | 45.19 | 230 |
+| 1 | OSNet x0.25 | 4.45 | 87.28 | 38.52 | 45.58 | 219 |
+| 5 | None | 0.00 | 18.12 | 34.13 | 39.01 | 189 |
+| 5 | Histogram | 0.13 | 18.45 | 34.36 | 39.79 | 195 |
+| 5 | OSNet x0.25 | 3.32 | 19.15 | 34.62 | 40.27 | 186 |
+
+- With the YOLOX-s detections, appearance does improve the scores: +0.84 HOTA for the
+  histogram and +0.99 for OSNet at N = 1. With the stronger SDP detections above, it did
+  not. A possible cause, not tested: a weaker detector misses objects more frequently,
+  so more tracks become lost and can recover.
+- The histogram gives most of the gain of OSNet for about 3% of its time.
+- OSNet adds 5.30 ms to the mean frame at N = 1, which is 6.5%.
+- The tracker requests few vectors. OSNet takes about 1.6 ms for each box, so 4.45 ms is
+  about 3 boxes for each detector run.
+
 Limits of this experiment:
 
 - The gap removes detections only. The pixels do not change, so the object looks the
   same after the gap as before it.
-- The appearance vectors come from stored files, so the step times above do not include
-  the embedder.
+- In the occlusion experiment and in the SDP table, the appearance vectors come from
+  stored files, so those step times do not include the embedder.
 - The tune split has 73 to 89 events and the test split has 82 to 112. One event is about
   1 percentage point.
+
+## Failure predictor
+
+A logistic regression gives the probability that a track box is wrong. A box is "wrong"
+if its IoU with each annotated box is below 0.5. The model has 8 features that are
+available at run time: frames since the last detection, flow reliability, motion since
+the last detection, detection score, track age, position uncertainty, overlap with
+other tracks, and box size. At run time it costs one dot product for each track.
+
+The data comes from pipeline runs at N = 5 and N = 10 with YOLOX-s and optical flow. The
+model learns on sequences 02, 04 and 09 (44,330 boxes, 6.1% wrong). The table shows
+sequences 05, 10, 11 and 13 (32,988 boxes, 11.7% wrong).
+
+| Predictor | AUC | Average precision |
+|---|---:|---:|
+| Logistic regression, 8 features | 0.73 | 0.34 |
+| Flow reliability only | 0.71 | 0.42 |
+| Motion since detection only | 0.67 | 0.26 |
+| Detection score only | 0.64 | 0.26 |
+
+![Predicted probability against the observed rate](assets/failure_calibration.png)
+
+**Result: the predictor is weak, and it is not useful as a filter.**
+
+- The model is only a little better than the flow reliability alone in AUC, and it is
+  worse in average precision.
+- The calibration does not transfer. The expected calibration error on the test
+  sequences is 0.095. The rate of wrong boxes is 6.1% in the static-camera sequences and
+  11.7% in the moving-camera sequences, so the model predicts too low.
+- When the model learns on the first half of each sequence and the test uses the second
+  half, the error is 0.031, and the model is better than the single feature (AUC 0.72
+  against 0.66). Thus the model needs data from the scene type where it runs.
+- Removal of boxes above a probability limit makes HOTA lower at each limit:
+
+| N | Limit | Boxes removed (%) | HOTA | MOTA |
+|---:|---:|---:|---:|---:|
+| 5 | none | 0.00 | 33.38 | 33.41 |
+| 5 | 0.90 | 2.65 | 33.19 | 33.41 |
+| 5 | 0.70 | 5.48 | 32.81 | 32.96 |
+| 5 | 0.50 | 8.95 | 32.27 | 32.34 |
+| 10 | none | 0.00 | 30.13 | 27.65 |
+| 10 | 0.90 | 6.08 | 29.57 | 27.83 |
+| 10 | 0.70 | 9.94 | 29.05 | 27.35 |
+| 10 | 0.50 | 14.43 | 28.35 | 26.48 |
+
+The pipeline can attach the probability to each reported object, and it does not remove
+objects. The repository does not include model weights, because the MOT17 data has a
+non-commercial license. `bench/failure.py` writes the weights to `runs/`.
 
 ## Detector backends
 
@@ -255,7 +326,20 @@ python3.12 -m venv .venv
 
 ## Use
 
-Track one MOTChallenge sequence from its detection file:
+Track a video file or an image directory with a YOLOX model:
+
+```sh
+.venv/bin/leantrack track video.mp4 --out tracks.txt --model models/yolox_s.onnx \
+    --interval 3 --flow --reid histogram
+```
+
+- `--interval N` runs the detector on each N-th frame.
+- `--flow` corrects the tracks with optical flow between detector runs.
+- `--reid` is `none`, `histogram`, or the path of a ReID model in ONNX format.
+
+The output has the MOTChallenge format: `frame, id, left, top, width, height, score`.
+
+Track one MOTChallenge sequence from its detection file, without a model:
 
 ```sh
 .venv/bin/leantrack track data/MOT17/train/MOT17-02-FRCNN --out runs/MOT17-02.txt
@@ -284,6 +368,12 @@ Run the occlusion experiment (the OSNet variant needs an ONNX export of OSNet x0
 .venv/bin/python -m bench.cache_embeddings histogram
 .venv/bin/python -m bench.cache_embeddings osnet --model models/osnet_x0_25_msmt17.onnx
 .venv/bin/python -m bench.occlusion --split test --jobs 6
+```
+
+Run the failure predictor experiment:
+
+```sh
+.venv/bin/python -m bench.failure yolox_s --jobs 6
 ```
 
 ## Prior work

@@ -17,7 +17,14 @@ from pathlib import Path
 
 import numpy as np
 
-from bench._eval import METRICS, evaluate, load_embeddings, markdown_table, mot17_sequences
+from bench._eval import (
+    HISTOGRAM_CONFIG,
+    METRICS,
+    evaluate,
+    load_embeddings,
+    markdown_table,
+    mot17_sequences,
+)
 from leantrack._types import Detections, TrackedObject
 from leantrack.io.mot import MotSequence, MotWriter, read_detections
 from leantrack.tracks.tracker import Tracker, TrackerConfig
@@ -27,7 +34,7 @@ Step = Callable[[int, Detections], list[TrackedObject]]
 
 EMBEDDINGS = Path("runs/embeddings")
 _LONG = TrackerConfig(max_lost_frames=90)
-_HISTOGRAM = replace(_LONG, max_appearance_distance=0.2, max_lost_match_distance=0.3)
+_HISTOGRAM = replace(HISTOGRAM_CONFIG, max_lost_frames=90)
 
 
 def _leantrack(config: TrackerConfig, embedder: str | None, sequence: MotSequence) -> Step:

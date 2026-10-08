@@ -11,10 +11,15 @@ from leantrack.io.mot import MotSequence, MotWriter
 from leantrack.io.sources import image_dir_frames, index_frames
 from leantrack.pipeline import run
 from leantrack.propagate.flow import FlowPropagator
+from leantrack.reid.base import Embedder
 from leantrack.schedule.policy import SchedulePolicy
-from leantrack.tracks.tracker import Tracker
+from leantrack.tracks.tracker import Tracker, TrackerConfig
 
 METRICS = ("HOTA", "AssA", "DetA", "MOTA", "IDF1", "IDSW")
+
+HISTOGRAM_CONFIG = TrackerConfig(max_appearance_distance=0.2, max_lost_match_distance=0.3)
+"""The histogram distances are smaller than the OSNet distances, so it has its own limits.
+The values come from the tune split of the occlusion experiment."""
 
 
 def mot17_sequences(data: Path, detector: str = "FRCNN") -> list[MotSequence]:
@@ -34,6 +39,8 @@ def run_policy(
     cache: Path,
     out: Path,
     flow: bool,
+    embedder: Embedder | None = None,
+    config: TrackerConfig | None = None,
 ) -> dict[str, float]:
     """Track each sequence from stored detections and write `out/data/<sequence>.txt`.
 
@@ -41,26 +48,30 @@ def run_policy(
     time, so the frame time uses the latency that the model had on that frame.
     """
     frame_ms: list[float] = []
+    embed_ms: list[float] = []
     detector_runs = 0
+    pixels = flow or embedder is not None
     for sequence in sequences:
         detector = MotFileDetector(cache / f"{sequence.name}.txt")
         detect_ms = np.load(cache / f"{sequence.name}.latency.npy")
-        # The flow needs the pixels. The Kalman prediction does not, so it skips the decode.
-        frames = image_dir_frames(sequence.image_dir) if flow else index_frames(sequence.length)
+        # The flow and the embedder need the pixels. Without them, the run skips the decode.
+        frames = image_dir_frames(sequence.image_dir) if pixels else index_frames(sequence.length)
         propagator = FlowPropagator() if flow else None
-        results = run(frames, detector, Tracker(), make_policy(), propagator)
+        results = run(frames, detector, Tracker(config), make_policy(), propagator, embedder)
         with MotWriter(out / "data" / f"{sequence.name}.txt") as writer:
             for result in results:
                 writer.write(result.frame_index, result.objects)
-                cost = result.track_ms + result.propagate_ms
+                cost = result.track_ms + result.propagate_ms + result.embed_ms
                 if result.detected:
                     cost += float(detect_ms[result.frame_index - 1])
                     detector_runs += 1
+                    embed_ms.append(result.embed_ms)
                 frame_ms.append(cost)
     p50, p99 = np.percentile(frame_ms, [50, 99])
     return {
         "detector_runs_pct": 100 * detector_runs / len(frame_ms),
         "mean_ms": float(np.mean(frame_ms)),
+        "embed_ms_per_run": float(np.mean(embed_ms)),
         "p50_ms": float(p50),
         "p99_ms": float(p99),
     }
