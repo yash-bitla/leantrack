@@ -8,16 +8,18 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phases 1, 2 and 3 of 6 are complete. The scheduler has a fixed-interval policy and a
-confidence trigger, with optical flow between detector runs. Lost tracks can recover by
-appearance. A learned failure predictor exists, but its measured value is small.
+Phases 1, 2 and 3 of 6 are complete, and Phase 4 is in progress. The scheduler has a
+fixed-interval policy and a confidence trigger, with optical flow between detector runs.
+Lost tracks can recover by appearance. A learned failure predictor exists, but its
+measured value is small. The detector can run in a background thread for a live stream.
+A frame time budget and a quantized model do not exist yet.
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Tracker core, MOT input and output, evaluation, baseline | Complete |
 | 2 | Detection scheduler, track propagation between detections | Complete |
 | 3 | Failure detection, recovery, re-identification | Complete |
-| 4 | Budget controller, ONNX detector, benchmark report | Not started |
+| 4 | Background detector, budget controller, quantized model | In progress |
 | 5 | Stream service, metrics endpoint, container | Not started |
 | 6 | Demo assets, decision records | Not started |
 
@@ -167,6 +169,61 @@ Kalman prediction only. Each row is one point near a frame time budget.
 A larger model with a longer interval can be better than a smaller model on each frame.
 YOLOX-m at N = 3 is faster than YOLOX-s at N = 1 and has a higher score. Thus the model
 size and the interval must be selected together.
+
+## Live stream with a slow detector
+
+The experiments above process each frame and do not count time. On a live stream, the
+frames arrive at a fixed rate. YOLOX-s takes about 80 ms on this CPU, and a frame at 30
+frames for each second arrives each 33 ms.
+
+This experiment uses a simulated clock. Frames arrive at the frame rate of each
+sequence, and a detector run takes the stored latency of the model on that frame. An
+output counts for a frame only if it is complete before the next frame arrives.
+
+- **Blocking:** the loop waits for the detector and then takes the newest frame. The
+  frames between are dropped, and the screen shows the newest complete result.
+- **Background:** the detector runs in a separate thread. Each frame gets an output from
+  the Kalman prediction and the optical flow. A detector result is some frames old when
+  it arrives, so optical flow moves the detected boxes to the current frame before the
+  association.
+- **Background, no correction:** the late detections are used as they are.
+
+| Model | Mode | Age of the result (frames) | Output latency, mean (ms) | Output latency, p99 (ms) | HOTA | MOTA | IDSW |
+|---|---|---:|---:|---:|---:|---:|---:|
+| YOLOX-tiny | Offline reference | 0.00 | - | - | 31.95 | 26.16 | 191 |
+| YOLOX-tiny | Blocking | 0.02 | 22.94 | 41.42 | 31.94 | 26.12 | 192 |
+| YOLOX-tiny | Background | 1.01 | 4.04 | 8.40 | 31.34 | 25.32 | 171 |
+| YOLOX-tiny | Background, no correction | 1.01 | 2.52 | 4.05 | 30.41 | 24.00 | 171 |
+| YOLOX-s | Offline reference | 0.00 | - | - | 37.53 | 33.12 | 245 |
+| YOLOX-s | Blocking | 2.70 | 101.44 | 147.27 | 32.90 | 25.10 | 314 |
+| YOLOX-s | Background | 2.68 | 5.12 | 18.02 | 34.49 | 29.63 | 229 |
+| YOLOX-s | Background, no correction | 2.68 | 2.81 | 4.56 | 31.55 | 23.44 | 247 |
+| YOLOX-m | Offline reference | 0.00 | - | - | 40.03 | 35.23 | 238 |
+| YOLOX-m | Blocking | 7.45 | 219.36 | 319.01 | 26.83 | 10.93 | 469 |
+| YOLOX-m | Background | 5.24 | 5.27 | 29.87 | 32.97 | 26.70 | 233 |
+| YOLOX-m | Background, no correction | 5.24 | 2.82 | 4.67 | 28.59 | 15.14 | 246 |
+
+The "age" is the mean number of frames between the image that the detector saw and the
+frame that uses the result. The offline reference is not possible on a live stream.
+
+- For a detector that is slower than the frame period, the background mode is faster and
+  more accurate. With YOLOX-s, the mean output latency goes from 101.44 ms to 5.12 ms
+  and HOTA goes from 32.90 to 34.49. With YOLOX-m, HOTA goes from 26.83 to 32.97.
+- The correction of late detections is necessary. Without it, HOTA is 2.94 lower for
+  YOLOX-s and 4.38 lower for YOLOX-m.
+- For a detector that is faster than the frame period, the blocking loop is better.
+  YOLOX-tiny takes 23 ms, so its result is ready in time. The background mode makes that
+  result one frame late and loses 0.60 HOTA.
+- On a live stream, the largest model is not the best model. YOLOX-s in the background
+  (34.49) is better than YOLOX-m in the background (32.97), although YOLOX-m is better
+  offline.
+- The background loop is in time: with YOLOX-m, 0.32% of the frames took longer than the
+  frame period, and with the other models none did.
+
+The times of the optical flow and the tracker are real measurements from 4 parallel
+worker processes. The detector latency is the stored value. The `ThreadedExecutor` runs
+the same logic with a real thread. Its tests use a slow test detector, and no experiment
+measured it on a live camera.
 
 ## Recovery after occlusion
 
@@ -336,6 +393,8 @@ Track a video file or an image directory with a YOLOX model:
 - `--interval N` runs the detector on each N-th frame.
 - `--flow` corrects the tracks with optical flow between detector runs.
 - `--reid` is `none`, `histogram`, or the path of a ReID model in ONNX format.
+- `--background` runs the detector in a background thread, for a live stream. It paces
+  the frames at the frame rate of the source and replaces `--interval`.
 
 The output has the MOTChallenge format: `frame, id, left, top, width, height, score`.
 
@@ -360,6 +419,12 @@ Run the interval experiment (this needs `models/yolox_s.onnx`):
 .venv/bin/python -m bench.interval yolox_s
 .venv/bin/python -m bench.interval yolox_s --flow
 .venv/bin/python -m bench.trigger yolox_s --jobs 4
+```
+
+Run the live stream experiment:
+
+```sh
+.venv/bin/python -m bench.realtime yolox_s --jobs 4
 ```
 
 Run the occlusion experiment (the OSNet variant needs an ONNX export of OSNet x0.25):
