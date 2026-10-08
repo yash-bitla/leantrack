@@ -48,25 +48,28 @@ class _MovingDetector:
 
 def test_simulated_executor_follows_the_clock() -> None:
     executor = SimulatedExecutor(_MovingDetector(), lambda index: 80.0, frame_period_ms=100 / 3)
-    assert executor.poll(1, 0.0) is None
+    assert executor.poll(1, 0.0) == (None, 0.0)
     executor.submit(Frame(1))
     assert executor.busy
     with pytest.raises(RuntimeError):
         executor.submit(Frame(2))
     # The run starts at 33.3 ms and is ready at 113.3 ms. Frame 3 is at 100 ms.
-    assert executor.poll(3, 0.0) is None
-    late = executor.poll(3, 20.0)
+    assert executor.poll(3, 0.0) == (None, 0.0)
+    # A wait of 10 ms is too short: the caller loses the 10 ms and gets no result.
+    assert executor.poll(3, 10.0) == (None, 10.0)
+    late, waited_ms = executor.poll(3, 20.0)
     assert late is not None
     assert late.frame_index == 1
-    assert late.waited_ms == pytest.approx(13.33, abs=0.01)
+    assert late.latency_ms == 80.0
+    assert waited_ms == pytest.approx(13.33, abs=0.01)
     assert not executor.busy
 
 
 def test_simulated_executor_gives_a_ready_result_without_a_wait() -> None:
     executor = SimulatedExecutor(_MovingDetector(), lambda index: 80.0, frame_period_ms=100 / 3)
     executor.submit(Frame(1))
-    late = executor.poll(4, 0.0)
-    assert late is not None and late.waited_ms == 0.0
+    late, waited_ms = executor.poll(4, 0.0)
+    assert late is not None and waited_ms == 0.0
 
 
 def test_threaded_executor_does_not_block() -> None:
@@ -74,13 +77,13 @@ def test_threaded_executor_does_not_block() -> None:
     try:
         start = time.perf_counter()
         executor.submit(Frame(1))
-        assert executor.poll(1, 0.0) is None
+        assert executor.poll(1, 0.0)[0] is None
         assert time.perf_counter() - start < 0.1
         assert executor.busy
         with pytest.raises(RuntimeError):
             executor.submit(Frame(2))
 
-        late = executor.poll(2, 2000.0)
+        late, _ = executor.poll(2, 2000.0)
         assert late is not None
         assert late.frame_index == 1
         assert late.detections.boxes[0] == pytest.approx(_true_box(1))
@@ -173,3 +176,63 @@ def test_cli_background_on_an_image_directory(
     assert main(arguments) == 0
     assert "12 frames" in capsys.readouterr().out
     assert out.is_file()
+
+
+def _budget_run(latency_ms: float, budget_ms: float) -> list[tuple[bool, int, float]]:
+    """(detected, detection age, time waited) for each frame, at a 33.3 ms frame period."""
+    executor = SimulatedExecutor(
+        _MovingDetector(), lambda index: latency_ms, frame_period_ms=100 / 3
+    )
+    results = run_realtime(
+        _moving_frames(16), executor, Tracker(), FlowPropagator(), frame_budget_ms=budget_ms
+    )
+    return [(r.detected, r.detection_age, r.detect_ms) for r in results]
+
+
+def test_without_a_budget_the_loop_does_not_wait() -> None:
+    frames = _budget_run(latency_ms=20.0, budget_ms=0.0)
+    assert all(waited == 0.0 for _, _, waited in frames)
+    # A 20 ms result is ready one frame later.
+    assert {age for detected, age, _ in frames if detected} == {1}
+
+
+def test_a_budget_above_the_latency_gives_a_new_result_on_each_frame() -> None:
+    frames = _budget_run(latency_ms=20.0, budget_ms=30.0)
+    # The loop does not know the latency before the first result. After that, it waits.
+    settled = frames[3:]
+    assert all(detected and age == 0 for detected, age, _ in settled)
+    assert all(waited == pytest.approx(20.0) for _, _, waited in settled)
+
+
+def test_the_loop_does_not_wait_for_a_result_that_cannot_fit_the_budget() -> None:
+    frames = _budget_run(latency_ms=80.0, budget_ms=10.0)
+    # 80 ms is ready 13.3 ms after the start of the third frame: more than the budget.
+    assert all(waited == 0.0 for _, _, waited in frames)
+    assert {age for detected, age, _ in frames if detected} == {3}
+
+
+def test_a_budget_decreases_the_age_of_a_slow_result() -> None:
+    frames = _budget_run(latency_ms=80.0, budget_ms=25.0)
+    settled = [(age, waited) for detected, age, waited in frames[4:] if detected]
+    # The loop waits 13.3 ms in the third frame and gets the result one frame sooner.
+    assert {age for age, _ in settled} == {2}
+    assert all(waited == pytest.approx(13.33, abs=0.01) for _, waited in settled)
+    assert all(waited == 0.0 for detected, _, waited in frames[4:] if not detected)
+
+
+def test_executors_report_the_time_of_the_run_in_progress() -> None:
+    simulated = SimulatedExecutor(_MovingDetector(), lambda index: 80.0, frame_period_ms=40.0)
+    assert simulated.pending_ms(5) == 0.0
+    simulated.submit(Frame(2))
+    assert simulated.pending_ms(5) == pytest.approx(120.0)
+
+    threaded = ThreadedExecutor(_MovingDetector(seconds=0.05))
+    try:
+        assert threaded.pending_ms(1) == 0.0
+        threaded.submit(Frame(1))
+        time.sleep(0.02)
+        assert threaded.pending_ms(1) >= 20.0
+        late, _ = threaded.poll(1, 2000.0)
+        assert late is not None and late.latency_ms >= 50.0
+    finally:
+        threaded.close()
