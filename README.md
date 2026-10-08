@@ -8,11 +8,11 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phases 1 to 4 of 6 are complete. The scheduler has a fixed-interval policy and a
+Phases 1 to 5 of 6 are complete. The scheduler has a fixed-interval policy and a
 confidence trigger, with optical flow between detector runs. Lost tracks can recover by
 appearance. A learned failure predictor exists, but its measured value is small. For a
 live stream, the detector can run in a background thread with a frame time budget, and
-a script makes an INT8 model. A stream service does not exist yet.
+a script makes an INT8 model. A stream service gives the results through HTTP.
 
 | Phase | Content | Status |
 |---|---|---|
@@ -20,7 +20,7 @@ a script makes an INT8 model. A stream service does not exist yet.
 | 2 | Detection scheduler, track propagation between detections | Complete |
 | 3 | Failure detection, recovery, re-identification | Complete |
 | 4 | Background detector, frame time budget, quantized model | Complete |
-| 5 | Stream service, metrics endpoint, container | Not started |
+| 5 | Stream service, metrics endpoint, container | Complete |
 | 6 | Demo assets, decision records | Not started |
 
 ## What exists
@@ -421,6 +421,74 @@ sequences 05, 10, 11 and 13 (32,988 boxes, 11.7% wrong).
 The pipeline can attach the probability to each reported object, and it does not remove
 objects. The repository does not include model weights, because the MOT17 data has a
 non-commercial license. `bench/failure.py` writes the weights to `runs/`.
+
+## Stream service
+
+`leantrack serve` runs the pipeline on one source and gives the results through HTTP.
+The source is a video file, an image directory, a stream address, or a camera index.
+
+```sh
+.venv/bin/pip install -e ".[serve]"
+.venv/bin/leantrack serve video.mp4 --model models/yolox_s_int8.onnx \
+    --background --frame-budget-ms 33 --reid histogram --loop
+```
+
+| Path | Content |
+|---|---|
+| `/` | A page with the video and the statistics |
+| `/video` | The video with the tracks, as an MJPEG stream |
+| `/ws` | A WebSocket with one JSON event for each frame |
+| `/stats` | Frame count, track count, frame rate, and latency as JSON |
+| `/metrics` | Metrics in the Prometheus format |
+| `/health` | The state of the pipeline. The status is 503 after a failure |
+
+One event of `/ws`:
+
+```json
+{
+  "frame": 132,
+  "detected": true,
+  "detection_age": 1,
+  "latency_ms": 5.003,
+  "objects": [{"id": 1, "box": [451.8, 403.9, 553.0, 727.1], "score": 0.893, "class": 0}]
+}
+```
+
+Design points:
+
+- The pipeline runs in one thread and never waits for a client. A client that reads too
+  slowly loses its oldest events, and `/stats` counts them.
+- The service draws and encodes the video only while a client reads `/video`.
+- A file source is paced at its frame rate, as a camera.
+
+One manual run on this machine: the sequence MOT17-09 at 30 frames for each second, with
+the INT8 YOLOX-s model in a real background thread. The service held 29.99 frames for
+each second. The frame latency was 4.7 ms at p50 and 32.1 ms at p99, over 224 frames.
+
+### Container and dashboard
+
+```sh
+docker build -t leantrack .
+docker run --rm -p 8000:8000 -v "$PWD/models:/models:ro" -v "$PWD/data:/data:ro" \
+    leantrack serve /data/video.mp4 --model /models/yolox_s.onnx --background --host 0.0.0.0
+```
+
+`compose.yaml` starts the service with Prometheus and Grafana. The dashboard in
+`deploy/grafana/dashboards/leantrack.json` shows the frame rate, the latency at p50 and
+p99, the share of frames with a detector result, the age of a detector result, and the
+number of reported objects.
+
+```sh
+SOURCE=/data/video.mp4 MODEL=/models/yolox_s.onnx docker compose up --build
+```
+
+Limits:
+
+- The service handles one source. It has no authentication, so do not put it on a
+  public network.
+- CI builds the image and starts the command in it. No test runs the complete compose
+  setup, and no person loaded the Grafana dashboard.
+- No test uses a camera or a network stream.
 
 ## Detector backends
 
