@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from leantrack._types import FloatArray
 from leantrack.detect.mot_file import MotFileDetector
 from leantrack.io.mot import MotSequence, MotWriter
 from leantrack.io.sources import image_dir_frames, index_frames
@@ -18,6 +19,13 @@ METRICS = ("HOTA", "AssA", "DetA", "MOTA", "IDF1", "IDSW")
 
 def mot17_sequences(data: Path, detector: str = "FRCNN") -> list[MotSequence]:
     return [MotSequence.load(root) for root in sorted(data.glob(f"MOT17-*-{detector}"))]
+
+
+def load_embeddings(path: Path, detections_path: Path) -> dict[int, FloatArray]:
+    """Stored appearance vectors by frame, in the row order of `read_detections`."""
+    vectors = np.load(path).astype(np.float64)
+    frames = np.loadtxt(detections_path, delimiter=",", ndmin=2)[:, 0].astype(np.int64)
+    return {int(frame): vectors[frames == frame] for frame in np.unique(frames)}
 
 
 def run_policy(
@@ -106,7 +114,7 @@ def evaluate(
 
 
 def markdown_table(rows: dict[str, dict[str, float]], columns: list[str], label: str) -> str:
-    integer = {"IDSW", "interval"}
+    integer = {"IDSW", "interval", "events"}
     lines = [f"| {label} | " + " | ".join(columns) + " |", "|---|" + "---:|" * len(columns)]
     for name, row in rows.items():
         cells = [f"{row[c]:.0f}" if c in integer else f"{row[c]:.2f}" for c in columns]

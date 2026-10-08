@@ -37,6 +37,8 @@ class Track:
     """Path length of the box center since the last detection match, in box sizes."""
     reliability: float = 1.0
     """Reliability that the propagator reported in the last frame. 1.0 after a detection."""
+    embedding: FloatArray | None = None
+    """Appearance vector with unit length. None until the first clean detection match."""
     pending: FloatArray | None = None
     """Propagated box (cx, cy, w, h) of this frame that the filter did not use yet."""
 
