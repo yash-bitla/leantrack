@@ -80,7 +80,11 @@ def _blocking(
 
 
 def _background(
-    sequence: MotSequence, detector: MotFileDetector, latency: np.ndarray, compensate: bool
+    sequence: MotSequence,
+    detector: MotFileDetector,
+    latency: np.ndarray,
+    compensate: bool,
+    budget_ms: float,
 ) -> tuple[list[tuple[int, list[TrackedObject]]], dict[str, list[float]]]:
     period = 1000.0 / sequence.frame_rate
     # The simulated clock of the executor starts at frame index 0, so use index - 1.
@@ -90,6 +94,7 @@ def _background(
         executor,
         Tracker(),
         FlowPropagator(),
+        frame_budget_ms=budget_ms,
         compensate=compensate,
     )
     outputs = []
@@ -103,15 +108,15 @@ def _background(
     return outputs, stats
 
 
-def _job(args: tuple[Path, Path, str, str, Path]) -> dict[str, list[float]]:
-    root, cache, mode, name, out = args
+def _job(args: tuple[Path, Path, str, str, Path, float]) -> dict[str, list[float]]:
+    root, cache, mode, name, out, budget_ms = args
     sequence = MotSequence.load(root)
     detector = MotFileDetector(cache / f"{sequence.name}.txt")
     latency = np.load(cache / f"{sequence.name}.latency.npy")
     if mode in ("offline", "blocking"):
         outputs, stats = _blocking(sequence, detector, latency, offline=mode == "offline")
     else:
-        outputs, stats = _background(sequence, detector, latency, mode == "background")
+        outputs, stats = _background(sequence, detector, latency, mode == "background", budget_ms)
     with MotWriter(out / name / "data" / f"{sequence.name}.txt") as writer:
         for index, objects in outputs:
             writer.write(index, objects)
@@ -126,6 +131,12 @@ def main() -> int:
     p.add_argument("--cache", type=Path, default=Path("runs/detections"))
     p.add_argument("--out", type=Path, default=Path("runs/realtime"))
     p.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    p.add_argument(
+        "--budgets",
+        type=float,
+        nargs="+",
+        help="frame time budgets in ms for the background mode. Replaces --modes",
+    )
     p.add_argument("--jobs", type=int, default=1, help="worker processes; more than 1 adds noise")
     args = p.parse_args()
 
@@ -133,15 +144,20 @@ def main() -> int:
     out = args.out / args.model
     cache = args.cache / args.model
     costs: dict[str, dict[str, float]] = {}
+    # name -> (mode, frame time budget in ms)
+    runs: dict[str, tuple[str, float]] = {mode: (mode, 0.0) for mode in args.modes}
+    if args.budgets:
+        runs = {f"budget-{b:04.1f}": ("background", b) for b in args.budgets}
+        out = out / "budget"
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        for mode in args.modes:
-            jobs = [(s.root, cache, mode, mode, out) for s in sequences]
+        for name, (mode, budget_ms) in runs.items():
+            jobs = [(s.root, cache, mode, name, out, budget_ms) for s in sequences]
             merged: dict[str, list[float]] = {}
             for stats in pool.map(_job, jobs):
                 for key, values in stats.items():
                     merged.setdefault(key, []).extend(values)
             latency = np.array(merged["latency_ms"])
-            costs[mode] = {
+            costs[name] = {
                 "detector_runs_pct": 100 * float(np.mean(merged["detected"])),
                 "mean_age_frames": float(np.mean(merged["age"])),
                 "max_age_frames": float(np.max(merged["age"])),
@@ -150,8 +166,8 @@ def main() -> int:
                 "over_period_pct": 100 * float(np.mean(latency > np.array(merged["period_ms"]))),
             }
 
-    scores = evaluate(list(args.modes), sequences, args.data, out)
-    summary = {mode: {**costs[mode], **scores[mode]} for mode in args.modes}
+    scores = evaluate(list(runs), sequences, args.data, out)
+    summary = {name: {**costs[name], **scores[name]} for name in runs}
     print(f"MOT17 train, {args.model}, live stream at the frame rate of each sequence")
     columns = [
         "detector_runs_pct",
