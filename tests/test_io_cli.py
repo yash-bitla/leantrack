@@ -61,9 +61,64 @@ def test_cli_tracks_a_sequence(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert set(ids) == {1.0, 2.0}
 
 
-def test_cli_reports_a_missing_sequence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_needs_a_model_for_plain_images(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert main(["track", str(tmp_path), "--out", str(tmp_path / "o.txt")]) == 2
-    assert "not a MOT sequence directory" in capsys.readouterr().err
+    assert "--model is necessary" in capsys.readouterr().err
+
+
+def test_cli_reports_a_missing_source(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["track", str(tmp_path / "missing.mp4"), "--out", str(tmp_path / "o.txt")]) == 2
+    assert "not found" in capsys.readouterr().err
+
+
+def test_cli_reports_an_unknown_reid_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scene = SyntheticScene((SyntheticObject((100, 100, 140, 180), (3.0, 0.0)),), length=5)
+    _write_sequence(tmp_path / "seq", scene)
+    arguments = ["track", str(tmp_path / "seq"), "--out", str(tmp_path / "o.txt")]
+    assert main([*arguments, "--reid", "missing.onnx"]) == 2
+    assert "--reid must be" in capsys.readouterr().err
+
+
+def _render(root: Path, scene: SyntheticScene, colors: list[tuple[int, int, int]]) -> None:
+    """Write the frames of a scene as images: a textured background and one color per object."""
+    (root / "img1").mkdir()
+    noise = np.random.default_rng(0).integers(0, 255, (360, 640, 3), dtype=np.uint8)
+    background = cv2.GaussianBlur(noise, (9, 9), 0) // 3
+    for frame in range(1, scene.length + 1):
+        image = background.copy()
+        for object_id, box in scene.ground_truth(frame).items():
+            x1, y1, x2, y2 = (round(float(v)) for v in box)
+            cv2.rectangle(image, (x1, y1), (x2, y2), colors[object_id - 1], thickness=-1)
+        cv2.imwrite(str(root / "img1" / f"{frame:06d}.png"), image)
+
+
+def test_cli_with_flow_and_reid_on_a_rendered_sequence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scene = SyntheticScene(
+        (
+            SyntheticObject((100, 100, 140, 180), (3.0, 0.0)),
+            SyntheticObject((400, 200, 440, 280), (-2.0, 0.0)),
+        ),
+        length=30,
+    )
+    root = tmp_path / "seq"
+    _write_sequence(root, scene)
+    _render(root, scene, [(0, 0, 255), (255, 0, 0)])
+    out = tmp_path / "result.txt"
+
+    arguments = ["track", str(root), "--out", str(out), "--interval", "5", "--flow"]
+    assert main([*arguments, "--reid", "histogram"]) == 0
+    assert "30 frames, 2 tracks, 6 detector runs" in capsys.readouterr().out
+
+    rows = np.loadtxt(out, delimiter=",")
+    assert set(rows[:, 1]) == {1.0, 2.0}
+    # Each track has a row on each frame, also between detector runs.
+    assert len(rows) == 60
 
 
 def test_sequence_metadata(tmp_path: Path) -> None:

@@ -6,11 +6,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from leantrack._types import Detections, FloatArray, IntArray
+from leantrack._types import Detections, FloatArray, Frame, IntArray
+from leantrack.pipeline import run
 from leantrack.propagate.kalman import KalmanFilter
 from leantrack.reid.base import crop
 from leantrack.reid.histogram import HistogramEmbedder
 from leantrack.reid.onnx import OnnxEmbedder
+from leantrack.synthetic import SyntheticObject, SyntheticScene
 from leantrack.tracks.track import TrackState
 from leantrack.tracks.tracker import Tracker, TrackerConfig
 
@@ -184,3 +186,53 @@ def test_lost_track_does_not_take_an_overlapping_object_that_looks_different() -
     _lose_track(appearance, tracker, use_embed=False)
     reported = tracker.update(appearance.frame([same_place], [BLUE]))
     assert [o.track_id for o in reported] == [1]
+
+
+class _SceneDetector:
+    def __init__(self, scene: SyntheticScene) -> None:
+        self.scene = scene
+
+    def detect(self, frame: Frame) -> Detections:
+        return self.scene.detections(frame.index)
+
+
+def _return_scene() -> tuple[SyntheticScene, list[Frame]]:
+    """A red object stands for 10 frames, is absent for 20, and returns 70 px to the right."""
+    scene = SyntheticScene(
+        (
+            SyntheticObject((100, 100, 140, 180), (0.0, 0.0), last_frame=10),
+            SyntheticObject((170, 100, 210, 180), (0.0, 0.0), first_frame=31),
+        ),
+        length=35,
+    )
+    frames = []
+    for index in range(1, scene.length + 1):
+        image = np.full((300, 400, 3), 40, dtype=np.uint8)
+        for box in scene.ground_truth(index).values():
+            x1, y1, x2, y2 = (round(float(v)) for v in box)
+            image[y1:y2, x1:x2] = (0, 0, 255)
+        frames.append(Frame(index, image))
+    return scene, frames
+
+
+def test_pipeline_recovers_a_track_with_an_embedder() -> None:
+    scene, frames = _return_scene()
+    config = TrackerConfig(max_lost_frames=60, max_appearance_distance=0.2)
+
+    plain = list(run(frames, _SceneDetector(scene), Tracker(config)))
+    assert [o.track_id for o in plain[-1].objects] == [2]
+    assert all(r.embed_ms == 0.0 for r in plain)
+
+    embedder = HistogramEmbedder()
+    recovered = list(run(frames, _SceneDetector(scene), Tracker(config), embedder=embedder))
+    assert [o.track_id for o in recovered[-1].objects] == [1]
+    assert any(r.embed_ms > 0.0 for r in recovered)
+    assert recovered[-1].total_ms == pytest.approx(
+        recovered[-1].detect_ms + recovered[-1].embed_ms + recovered[-1].track_ms
+    )
+
+
+def test_pipeline_with_embedder_needs_pixels() -> None:
+    scene, _ = _return_scene()
+    with pytest.raises(ValueError, match="pixels"):
+        list(run([Frame(1)], _SceneDetector(scene), Tracker(), embedder=HistogramEmbedder()))
