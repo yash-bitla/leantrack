@@ -28,10 +28,11 @@ def image_dir_frames(directory: str | Path) -> Iterator[Frame]:
         yield Frame(index, image)
 
 
-def video_frames(path: str | Path) -> Iterator[Frame]:
-    capture = cv2.VideoCapture(str(path))
+def video_frames(source: str | Path | int) -> Iterator[Frame]:
+    """Frames of a video file, a stream address, or a camera index."""
+    capture = cv2.VideoCapture(source if isinstance(source, int) else str(source))
     if not capture.isOpened():
-        raise OSError(f"cannot open video {path}")
+        raise OSError(f"cannot open video {source}")
     try:
         index = 0
         while True:
