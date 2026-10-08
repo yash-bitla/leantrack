@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bench._eval import load_embeddings, markdown_table
+from bench._eval import HISTOGRAM_CONFIG, load_embeddings, markdown_table
 from leantrack._types import Detections, FloatArray, TrackedObject
 from leantrack.boxes import iou_matrix
 from leantrack.io.mot import MotSequence, read_detections
@@ -47,11 +47,7 @@ _LONG = TrackerConfig(max_lost_frames=90)
 VARIANTS: dict[str, tuple[TrackerConfig, str | None]] = {
     "baseline": (TrackerConfig(), None),
     "lost-90": (_LONG, None),
-    # The histogram distances are smaller than the OSNet distances, so it has its own limits.
-    "histogram": (
-        replace(_LONG, max_appearance_distance=0.2, max_lost_match_distance=0.3),
-        "histogram",
-    ),
+    "histogram": (replace(HISTOGRAM_CONFIG, max_lost_frames=90), "histogram"),
     "osnet": (_LONG, "osnet"),
     "osnet-each-match": (replace(_LONG, embedding_refresh=1), "osnet"),
 }
