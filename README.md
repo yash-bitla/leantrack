@@ -1,11 +1,24 @@
 # leantrack
 
-A multi-object tracking runtime that uses the detector as a limited resource.
+[![ci](https://github.com/yash-bitla/leantrack/actions/workflows/ci.yml/badge.svg)](https://github.com/yash-bitla/leantrack/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+A real-time multi-object tracking (MOT) runtime that uses the detector as a limited
+resource.
 
 Most tracking libraries run the detector on every frame. On a live stream that is
 frequently not possible: a detector that takes 80 ms cannot keep up with a camera that
 gives a frame each 33 ms. `leantrack` decides when the detector runs, keeps each track
 correct between detector runs, and measures the accuracy cost of each decision.
+
+- **Tracks arrive about 20 times sooner on a live stream.** With the detector in a
+  background thread and optical flow between its results, the mean output latency is
+  5.1 ms in place of 101.4 ms, and HOTA is 1.59 points higher.
+- **It is built from standard parts.** A ByteTrack-style tracker with a Kalman filter,
+  YOLOX through ONNX Runtime, sparse optical flow, and recovery of lost tracks by
+  appearance (a color histogram or a ReID network).
+- **Each trade-off is measured on MOT17,** and the results that did not work are in the
+  repository too.
 
 ![A blocking loop beside a background detector on a live stream](assets/demo_live.gif)
 
