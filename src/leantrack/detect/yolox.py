@@ -41,7 +41,7 @@ class YoloxDetector:
     def detect(self, frame: Frame) -> Detections:
         if frame.image is None:
             raise ValueError("YoloxDetector needs the frame pixels")
-        blob, ratio = self._preprocess(frame.image)
+        blob, ratio = letterbox(frame.image, self._height, self._width)
         (output,) = self._session.run(None, {self._input_name: blob})
         return decode(
             output[0].astype(np.float64),
@@ -54,14 +54,19 @@ class YoloxDetector:
             classes=self._classes,
         )
 
-    def _preprocess(self, image: Image) -> tuple[Image, float]:
-        ratio = min(self._height / image.shape[0], self._width / image.shape[1])
-        new_h, new_w = round(image.shape[0] * ratio), round(image.shape[1] * ratio)
-        padded = np.full((self._height, self._width, 3), _PAD_VALUE, dtype=np.uint8)
-        padded[:new_h, :new_w] = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        # These models take BGR pixel values in 0..255 without normalization.
-        blob = np.ascontiguousarray(padded.transpose(2, 0, 1)[None], dtype=np.float32)
-        return blob, ratio
+
+def letterbox(image: Image, height: int, width: int) -> tuple[Image, float]:
+    """Resize an image into the model input, with padding at the right and the bottom.
+
+    Returns the (1, 3, H, W) input and the scale from image pixels to input pixels.
+    """
+    ratio = min(height / image.shape[0], width / image.shape[1])
+    new_h, new_w = round(image.shape[0] * ratio), round(image.shape[1] * ratio)
+    padded = np.full((height, width, 3), _PAD_VALUE, dtype=np.uint8)
+    padded[:new_h, :new_w] = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    # These models take BGR pixel values in 0..255 without normalization.
+    blob = np.ascontiguousarray(padded.transpose(2, 0, 1)[None], dtype=np.float32)
+    return blob, ratio
 
 
 def decode(

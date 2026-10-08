@@ -8,16 +8,18 @@ latency budget, and it will report the accuracy cost of each decision.
 
 ## Status
 
-Phases 1, 2 and 3 of 6 are complete. The scheduler has a fixed-interval policy and a
+Phases 1 to 4 of 6 are complete. The scheduler has a fixed-interval policy and a
 confidence trigger, with optical flow between detector runs. Lost tracks can recover by
-appearance. A learned failure predictor exists, but its measured value is small.
+appearance. A learned failure predictor exists, but its measured value is small. For a
+live stream, the detector can run in a background thread with a frame time budget, and
+a script makes an INT8 model. A stream service does not exist yet.
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Tracker core, MOT input and output, evaluation, baseline | Complete |
 | 2 | Detection scheduler, track propagation between detections | Complete |
 | 3 | Failure detection, recovery, re-identification | Complete |
-| 4 | Budget controller, ONNX detector, benchmark report | Not started |
+| 4 | Background detector, frame time budget, quantized model | Complete |
 | 5 | Stream service, metrics endpoint, container | Not started |
 | 6 | Demo assets, decision records | Not started |
 
@@ -167,6 +169,125 @@ Kalman prediction only. Each row is one point near a frame time budget.
 A larger model with a longer interval can be better than a smaller model on each frame.
 YOLOX-m at N = 3 is faster than YOLOX-s at N = 1 and has a higher score. Thus the model
 size and the interval must be selected together.
+
+## Live stream with a slow detector
+
+The experiments above process each frame and do not count time. On a live stream, the
+frames arrive at a fixed rate. YOLOX-s takes about 80 ms on this CPU, and a frame at 30
+frames for each second arrives each 33 ms.
+
+This experiment uses a simulated clock. Frames arrive at the frame rate of each
+sequence, and a detector run takes the stored latency of the model on that frame. An
+output counts for a frame only if it is complete before the next frame arrives.
+
+- **Blocking:** the loop waits for the detector and then takes the newest frame. The
+  frames between are dropped, and the screen shows the newest complete result.
+- **Background:** the detector runs in a separate thread. Each frame gets an output from
+  the Kalman prediction and the optical flow. A detector result is some frames old when
+  it arrives, so optical flow moves the detected boxes to the current frame before the
+  association.
+- **Background, no correction:** the late detections are used as they are.
+
+| Model | Mode | Age of the result (frames) | Output latency, mean (ms) | Output latency, p99 (ms) | HOTA | MOTA | IDSW |
+|---|---|---:|---:|---:|---:|---:|---:|
+| YOLOX-tiny | Offline reference | 0.00 | - | - | 31.95 | 26.16 | 191 |
+| YOLOX-tiny | Blocking | 0.02 | 22.94 | 41.42 | 31.94 | 26.12 | 192 |
+| YOLOX-tiny | Background | 1.01 | 4.04 | 8.40 | 31.34 | 25.32 | 171 |
+| YOLOX-tiny | Background, no correction | 1.01 | 2.52 | 4.05 | 30.41 | 24.00 | 171 |
+| YOLOX-s | Offline reference | 0.00 | - | - | 37.53 | 33.12 | 245 |
+| YOLOX-s | Blocking | 2.70 | 101.44 | 147.27 | 32.90 | 25.10 | 314 |
+| YOLOX-s | Background | 2.68 | 5.12 | 18.02 | 34.49 | 29.63 | 229 |
+| YOLOX-s | Background, no correction | 2.68 | 2.81 | 4.56 | 31.55 | 23.44 | 247 |
+| YOLOX-m | Offline reference | 0.00 | - | - | 40.03 | 35.23 | 238 |
+| YOLOX-m | Blocking | 7.45 | 219.36 | 319.01 | 26.83 | 10.93 | 469 |
+| YOLOX-m | Background | 5.24 | 5.27 | 29.87 | 32.97 | 26.70 | 233 |
+| YOLOX-m | Background, no correction | 5.24 | 2.82 | 4.67 | 28.59 | 15.14 | 246 |
+
+The "age" is the mean number of frames between the image that the detector saw and the
+frame that uses the result. The offline reference is not possible on a live stream.
+
+- For a detector that is slower than the frame period, the background mode is faster and
+  more accurate. With YOLOX-s, the mean output latency goes from 101.44 ms to 5.12 ms
+  and HOTA goes from 32.90 to 34.49. With YOLOX-m, HOTA goes from 26.83 to 32.97.
+- The correction of late detections is necessary. Without it, HOTA is 2.94 lower for
+  YOLOX-s and 4.38 lower for YOLOX-m.
+- For a detector that is faster than the frame period, the blocking loop is better.
+  YOLOX-tiny takes 23 ms, so its result is ready in time. The background mode makes that
+  result one frame late and loses 0.60 HOTA.
+- On a live stream, the largest model is not the best model. YOLOX-s in the background
+  (34.49) is better than YOLOX-m in the background (32.97), although YOLOX-m is better
+  offline.
+- The background loop is in time: with YOLOX-m, 0.32% of the frames took longer than the
+  frame period, and with the other models none did.
+
+The times of the optical flow and the tracker are real measurements from 4 parallel
+worker processes. The detector latency is the stored value. The `ThreadedExecutor` runs
+the same logic with a real thread. Its tests use a slow test detector, and no experiment
+measured it on a live camera.
+
+### Frame time budget
+
+The background loop above does not wait for the detector. That is wrong for a fast
+detector, as the YOLOX-tiny rows show. With a frame time budget, the loop waits for the
+detector only if it expects the result inside the budget. The estimate is a moving
+average of the durations of the earlier detector runs.
+
+| Model | Budget (ms) | Age of the result (frames) | Output latency, mean (ms) | Output latency, p99 (ms) | HOTA |
+|---|---:|---:|---:|---:|---:|
+| YOLOX-tiny | 0 | 1.01 | 4.42 | 10.70 | 31.34 |
+| YOLOX-tiny | 10 | 1.00 | 4.52 | 12.22 | 31.29 |
+| YOLOX-tiny | 20 | 1.00 | 4.50 | 16.67 | 31.29 |
+| YOLOX-tiny | 33 | 0.03 | 24.66 | 31.44 | 31.86 |
+| YOLOX-s | 0 | 2.68 | 5.53 | 22.14 | 34.49 |
+| YOLOX-s | 10 | 2.66 | 5.62 | 20.91 | 33.80 |
+| YOLOX-s | 20 | 2.33 | 6.13 | 21.85 | 34.13 |
+| YOLOX-s | 33 | 1.82 | 8.71 | 33.53 | 34.80 |
+| YOLOX-m | 0 | 5.24 | 5.29 | 29.61 | 32.97 |
+| YOLOX-m | 10 | 5.23 | 5.25 | 29.60 | 32.90 |
+| YOLOX-m | 20 | 5.21 | 5.70 | 31.33 | 33.09 |
+| YOLOX-m | 33 | 5.19 | 6.44 | 37.88 | 33.17 |
+
+- For the fast detector, the budget works as designed. At 33 ms, YOLOX-tiny gets a new
+  result on almost each frame, and HOTA goes from 31.34 to 31.86. The blocking loop gave
+  31.94.
+- For the slow detectors, the effect is small and not consistent. YOLOX-s is best at
+  33 ms but is worse at 10 ms than at 0 ms.
+- A change of the budget changes which frames the detector sees. That alone moves HOTA
+  by about 0.7 for YOLOX-s. Thus a difference below that size between two live
+  configurations is not reliable.
+
+### Quantized model
+
+`bench/quantize.py` makes an INT8 version of a YOLOX model with static quantization.
+The 122 calibration images are frames of the sequences 02, 04 and 09.
+
+| Model | File size (MB) | Detector time, mean (ms) | HOTA, offline | MOTA, offline |
+|---|---:|---:|---:|---:|
+| YOLOX-s, float | 35.9 | 79.83 | 37.53 | 33.12 |
+| YOLOX-s, INT8 | 9.3 | 28.47 | 36.53 | 31.99 |
+
+The INT8 model is 2.8 times faster and loses 1.00 HOTA offline. On the live stream, that
+exchange is a large gain, because the detector now fits in one frame period:
+
+| Model | Mode | Output latency, mean (ms) | Output latency, p99 (ms) | Frames over the period (%) | HOTA |
+|---|---|---:|---:|---:|---:|
+| YOLOX-s, float | Blocking | 101.44 | 147.27 | 100.00 | 32.90 |
+| YOLOX-s, float | Background | 5.12 | 18.02 | 0.00 | 34.49 |
+| YOLOX-s, INT8 | Blocking | 28.57 | 56.53 | 5.59 | 36.44 |
+| YOLOX-s, INT8 | Background | 4.31 | 9.64 | 0.00 | 35.70 |
+| YOLOX-s, INT8 | Background, budget 33 ms | 18.66 | 31.78 | 0.13 | 36.37 |
+
+- The INT8 model in a blocking loop (36.44) is 1.95 HOTA better than the float model in
+  the background (34.49). A faster model helped more than a better schedule.
+- The blocking loop is late on 5.59% of the frames. The background loop with a budget of
+  33 ms has almost the same HOTA (36.37) and is late on 0.13% of the frames.
+- These times are from an Apple M3 Pro CPU. The gain from INT8 depends on the processor.
+
+Limits of the live stream experiments:
+
+- The clock is simulated, as described above.
+- No experiment used a GPU, a CPU with a thread limit, or a small device.
+- No experiment measured memory or CPU use.
 
 ## Recovery after occlusion
 
@@ -336,6 +457,8 @@ Track a video file or an image directory with a YOLOX model:
 - `--interval N` runs the detector on each N-th frame.
 - `--flow` corrects the tracks with optical flow between detector runs.
 - `--reid` is `none`, `histogram`, or the path of a ReID model in ONNX format.
+- `--background` runs the detector in a background thread, for a live stream. It paces
+  the frames at the frame rate of the source and replaces `--interval`.
 
 The output has the MOTChallenge format: `frame, id, left, top, width, height, score`.
 
@@ -360,6 +483,22 @@ Run the interval experiment (this needs `models/yolox_s.onnx`):
 .venv/bin/python -m bench.interval yolox_s
 .venv/bin/python -m bench.interval yolox_s --flow
 .venv/bin/python -m bench.trigger yolox_s --jobs 4
+```
+
+Run the live stream experiment:
+
+```sh
+.venv/bin/python -m bench.realtime yolox_s --jobs 4
+.venv/bin/python -m bench.realtime yolox_s --jobs 4 --budgets 0 10 20 33
+```
+
+Make and measure the INT8 model (this needs the `onnx` package):
+
+```sh
+.venv/bin/python -m bench.quantize models/yolox_s.onnx models/yolox_s_int8.onnx
+.venv/bin/python bench/cache_detections.py models/yolox_s_int8.onnx
+.venv/bin/python -m bench.interval yolox_s_int8 --intervals 1
+.venv/bin/python -m bench.realtime yolox_s_int8 --jobs 4
 ```
 
 Run the occlusion experiment (the OSNet variant needs an ONNX export of OSNet x0.25):

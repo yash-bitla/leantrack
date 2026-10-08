@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import time
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import cv2
@@ -41,3 +42,24 @@ def video_frames(path: str | Path) -> Iterator[Frame]:
             yield Frame(index, image)
     finally:
         capture.release()
+
+
+def paced(frames: Iterable[Frame], fps: float) -> Iterator[Frame]:
+    """Give the frames at `fps`, as a camera does. A slow consumer gets no extra delay."""
+    if fps <= 0:
+        raise ValueError("fps must be positive")
+    start = time.perf_counter()
+    for count, frame in enumerate(frames):
+        delay = start + count / fps - time.perf_counter()
+        if delay > 0:
+            time.sleep(delay)
+        yield frame
+
+
+def video_fps(path: str | Path, default: float = 30.0) -> float:
+    capture = cv2.VideoCapture(str(path))
+    try:
+        fps = float(capture.get(cv2.CAP_PROP_FPS))
+    finally:
+        capture.release()
+    return fps if fps > 0 else default

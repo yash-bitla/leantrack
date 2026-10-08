@@ -29,6 +29,9 @@ class FrameResult:
     embed_ms: float
     """Time of the embedder. Zero without an embedder and on frames that need no vector."""
     track_ms: float
+    detection_age: int = 0
+    """Frames between the image of the detections and this frame. Not zero only when the
+    detector runs in the background and its result arrives late."""
 
     @property
     def total_ms(self) -> float:
