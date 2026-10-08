@@ -12,9 +12,10 @@ from leantrack.detect.base import Detector
 from leantrack.detect.mot_file import MotFileDetector
 from leantrack.detect.yolox import YoloxDetector
 from leantrack.io.mot import MotSequence, MotWriter
-from leantrack.io.sources import image_dir_frames, index_frames, video_frames
+from leantrack.io.sources import image_dir_frames, index_frames, paced, video_fps, video_frames
 from leantrack.pipeline import run
 from leantrack.propagate.flow import FlowPropagator
+from leantrack.realtime import ThreadedExecutor, run_realtime
 from leantrack.reid.base import Embedder
 from leantrack.reid.histogram import HistogramEmbedder
 from leantrack.reid.onnx import OnnxEmbedder
@@ -44,6 +45,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     track.add_argument(
         "--flow", action="store_true", help="correct the tracks with optical flow between runs"
+    )
+    track.add_argument(
+        "--background",
+        action="store_true",
+        help="run the detector in a background thread, for a live stream. The frames are "
+        "paced at the frame rate of the source, and optical flow is always on",
     )
     track.add_argument(
         "--reid",
@@ -80,6 +87,9 @@ def _track(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"{source} not found")
     sequence = MotSequence.load(source) if (source / "seqinfo.ini").is_file() else None
 
+    if args.background and not args.model:
+        raise ValueError("--background needs --model")
+
     detector: Detector
     if args.model:
         detector = YoloxDetector(args.model)
@@ -103,20 +113,39 @@ def _track(args: argparse.Namespace) -> int:
     frame_ms: list[float] = []
     detector_runs = 0
     ids: set[int] = set()
-    results = run(
-        _frames(source, sequence, pixels),
-        detector,
-        tracker,
-        FixedInterval(args.interval),
-        propagator,
-        embedder,
-    )
-    with MotWriter(args.out) as writer:
-        for result in results:
-            writer.write(result.frame_index, result.objects)
-            frame_ms.append(result.total_ms)
-            detector_runs += result.detected
-            ids.update(obj.track_id for obj in result.objects)
+    executor = None
+    if args.background:
+        if sequence is not None:
+            fps = sequence.frame_rate
+        else:
+            fps = 30.0 if source.is_dir() else video_fps(source)
+        executor = ThreadedExecutor(detector)
+        results = run_realtime(
+            paced(_frames(source, sequence, True), fps),
+            executor,
+            tracker,
+            FlowPropagator(),
+            embedder,
+        )
+    else:
+        results = run(
+            _frames(source, sequence, pixels),
+            detector,
+            tracker,
+            FixedInterval(args.interval),
+            propagator,
+            embedder,
+        )
+    try:
+        with MotWriter(args.out) as writer:
+            for result in results:
+                writer.write(result.frame_index, result.objects)
+                frame_ms.append(result.total_ms)
+                detector_runs += result.detected
+                ids.update(obj.track_id for obj in result.objects)
+    finally:
+        if executor is not None:
+            executor.close()
     if not frame_ms:
         raise ValueError(f"{source} has no frames")
 

@@ -63,7 +63,7 @@ class Tracker:
         self._kalman = KalmanFilter()
         self._tracks: list[Track] = []
         self._next_id = 1
-        self._frame = 0
+        self._first_association = True
 
     @property
     def tracks(self) -> list[Track]:
@@ -94,7 +94,6 @@ class Tracker:
         A lost track ignores `moved`, because the detector did not see the object and
         the pixels in its box can be an occluder.
         """
-        self._frame += 1
         for track in self._tracks:
             if track.state is TrackState.LOST:
                 # A lost track keeps its position velocity but its size stays constant.
@@ -190,6 +189,7 @@ class Tracker:
             if left.scores[col] >= cfg.new_track_score:
                 self._start(left, col)
 
+        self._first_association = False
         self._remove_expired()
 
         return [
@@ -326,8 +326,9 @@ class Tracker:
             class_id=int(detections.classes[index]),
         )
         self._next_id += 1
-        # No earlier frame exists to confirm against, so first-frame tracks start confirmed.
-        if self._frame == 1:
+        # No earlier detections exist to confirm against, so the tracks of the first
+        # association start confirmed.
+        if self._first_association:
             track.transition(TrackState.CONFIRMED)
         self._tracks.append(track)
 
