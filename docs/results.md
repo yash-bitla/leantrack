@@ -146,6 +146,11 @@ size and the interval must be selected together.
 
 ## Live stream with a slow detector
 
+This experiment follows the idea of streaming perception (Li, Wang and Ramanan, ECCV
+2020, arXiv 2005.10420): a result counts for the frame that is on the screen when the
+result is complete. The correction of late results follows Glimpse (Chen et al., SenSys
+2015). The conclusions below agree with those papers. They are not new findings.
+
 The experiments above process each frame and do not count time. On a live stream, the
 frames arrive at a fixed rate. YOLOX-s takes about 80 ms on this CPU, and a frame at 30
 frames for each second arrives each 33 ms.

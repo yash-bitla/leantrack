@@ -244,9 +244,19 @@ Ultralytics apply to the combination that you make.
 - The optical flow step follows MedianFlow (Kalal et al., 2010).
 - Detection at intervals with tracking between detections is not a new idea. See
   Confidence-Triggered Detection (arXiv 1902.00615) and SDOF-Tracker (arXiv 2106.14259).
+- A learned decision between a detector run and a tracker step is in "Detect or Track"
+  (Luo et al., AAAI 2019, arXiv 1811.05340).
+- The live stream experiment is a small version of streaming perception. "Towards
+  Streaming Perception" (Li, Wang and Ramanan, ECCV 2020, arXiv 2005.10420) defined an
+  accuracy that includes latency. It showed that an optimal point exists on the latency
+  and accuracy curve, and that asynchronous tracking is a part of the solution.
+  "Context-Aware Streaming Perception in Dynamic Environments" (arXiv 2208.07479)
+  applied that idea to tracking with a streaming MOTA.
+- The correction of a late detector result with stored frames follows Glimpse (Chen et
+  al., SenSys 2015), which tracks from old results that arrive late from a server.
 
-This project adds a tested implementation, the measurements of each trade, and the
-results that did not work.
+This project has no new algorithm. It adds a tested implementation of these ideas in one
+runtime, the measurements of each trade, and the results that did not work.
 
 ## Data and licenses
 
