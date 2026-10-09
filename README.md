@@ -20,6 +20,8 @@ correct between detector runs, and measures the accuracy cost of each decision.
 - **Each trade-off is measured on MOT17,** and the results that did not work are in the
   repository too.
 
+The story behind these results is in the blog post [My object detector was too slow for live video. So I stopped waiting for it.](https://yashbitla.com/blog/stopped-waiting-for-the-detector/)
+
 ![A blocking loop beside a background detector on a live stream](assets/demo_live.gif)
 
 *Left: the loop waits for the detector, so the boxes are behind the people. Right: the
